@@ -1079,13 +1079,402 @@ import SwiftUI
 
 /// Intel memory tab. The upstream `MemoryView` (the `#if !OSAURUS_INTEL` half)
 /// drives the MLX/VecturaKit distillation+episode subsystem; on Intel we expose
-/// the Phase-1 transcript-recall MVP: a master toggle, an embedding-backend
-/// picker (off / on-device static model2vec / cloud), a recall budget, and a
-/// clear-memory action. Storage is the SQLCipher-encrypted memory DB; embeddings
-/// are the pure-Swift `StaticEmbedder` or an OpenAI-compatible cloud API.
+/// the Phase-1 transcript-recall MVP across three tabs:
+///  - **Identity**: the auto-derived identity narrative (written by
+///    `IntelMemoryService.applyIdentityDelta`) plus user overrides.
+///  - **Settings**: master toggle, embedding-backend picker (off / on-device
+///    static model2vec / cloud), recall budget, and clear-memory.
+///  - **Statistics**: distillation call counts and database size.
+/// Storage is the SQLCipher-encrypted memory DB; embeddings are the pure-Swift
+/// `StaticEmbedder` or an OpenAI-compatible cloud API.
+///
+/// A `.diagnostics` case belongs on `MemoryTab` once `MemoryDiagnostics`
+/// (being built in parallel, see `docs/MEMORY_PLAN.md` §5) is ready to bind
+/// to — deliberately not added yet so this file doesn't reference a service
+/// contract still in flux.
+enum MemoryTab: String, CaseIterable, AnimatedTabItem {
+    case identity = "Identity"
+    case settings = "Settings"
+    case statistics = "Statistics"
+
+    var title: String {
+        switch self {
+        case .identity: return L("Identity")
+        case .settings: return L("Settings")
+        case .statistics: return L("Statistics")
+        }
+    }
+}
+
 struct MemoryView: View {
     @ObservedObject private var themeManager = ThemeManager.shared
     private var theme: ThemeProtocol { themeManager.currentTheme }
+
+    @State private var selectedTab: MemoryTab = .identity
+    @State private var hasAppeared = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            headerView
+                .opacity(hasAppeared ? 1 : 0)
+                .offset(y: hasAppeared ? 0 : -10)
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: hasAppeared)
+
+            Group {
+                switch selectedTab {
+                case .identity:
+                    MemoryIdentityTabContent()
+                case .settings:
+                    MemorySettingsTabContent()
+                case .statistics:
+                    MemoryStatisticsTabContent()
+                }
+            }
+            .opacity(hasAppeared ? 1 : 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.primaryBackground)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.25).delay(0.05)) {
+                hasAppeared = true
+            }
+        }
+    }
+
+    private var headerView: some View {
+        ManagerHeaderWithTabs(
+            title: L("Memory"),
+            subtitle: L(
+                "On-device semantic memory — your chats are embedded locally and recalled when relevant.")
+        ) {
+            EmptyView()
+        } tabsRow: {
+            HeaderTabsRow(selection: $selectedTab)
+        }
+    }
+}
+
+// MARK: - Identity Tab
+
+/// Displays the auto-derived identity narrative and user overrides, both
+/// read straight from `MemoryDatabase` — there is no separate Intel
+/// "identity service" to bind to. `identity.content` is written by
+/// `IntelMemoryService.applyIdentityDelta` after session-end distillation,
+/// so a fresh install (or one where no session has been distilled yet)
+/// legitimately has nothing here; that's rendered as an explicit empty
+/// state below, never a blank panel.
+private struct MemoryIdentityTabContent: View {
+    @ObservedObject private var themeManager = ThemeManager.shared
+    private var theme: ThemeProtocol { themeManager.currentTheme }
+
+    @State private var identity: Identity?
+    @State private var databaseOpen = false
+    @State private var showEditSheet = false
+    @State private var showAddOverride = false
+    @State private var errorMessage: String?
+
+    private static let iso8601Formatter = ISO8601DateFormatter()
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    private static func formatRelativeDate(_ iso8601: String) -> String {
+        guard let date = iso8601Formatter.date(from: iso8601) else { return iso8601 }
+        return relativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.errorColor)
+                }
+                identityCard
+                overridesCard
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.primaryBackground)
+        .onAppear(perform: reload)
+        .sheet(isPresented: $showEditSheet) {
+            IdentityEditSheet(identity: identity, onSave: saveIdentityEdit)
+                .frame(minWidth: 500, minHeight: 400)
+        }
+        .sheet(isPresented: $showAddOverride) {
+            AddOverrideSheet(onAdd: addOverride)
+                .frame(minWidth: 440, minHeight: 220)
+        }
+    }
+
+    private var identityCard: some View {
+        MemorySectionCard(title: "Identity", icon: "person.fill") {
+            MemorySectionActionButton("Edit", icon: "pencil") {
+                showEditSheet = true
+            }
+        } content: {
+            if let identity, !identity.content.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(identity.content)
+                        .font(.system(size: 13))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(theme.inputBackground)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(theme.inputBorder, lineWidth: 1)
+                                )
+                        )
+
+                    HStack(spacing: 12) {
+                        if identity.version > 0 {
+                            metadataTag("v\(identity.version)")
+                        }
+                        metadataTag(pluralizedMemory(identity.tokenCount, "token"))
+                        if !identity.model.isEmpty {
+                            metadataTag(identity.model)
+                        }
+
+                        Spacer()
+
+                        if !identity.generatedAt.isEmpty {
+                            Text(Self.formatRelativeDate(identity.generatedAt))
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.tertiaryText)
+                                .help(identity.generatedAt)
+                        }
+                    }
+                }
+            } else if databaseOpen {
+                emptyState(
+                    "No identity yet. Chat with Osaurus and the memory system will build your identity from session distillations."
+                )
+            } else {
+                emptyState("Memory database is not open yet — identity will appear here once it is.")
+            }
+        }
+    }
+
+    private var overridesCard: some View {
+        let overrides = identity?.overrides ?? []
+        return MemorySectionCard(
+            title: "Your Overrides",
+            icon: "pin.fill",
+            count: overrides.isEmpty ? nil : overrides.count
+        ) {
+            MemorySectionActionButton("Add", icon: "plus") {
+                showAddOverride = true
+            }
+        } content: {
+            if overrides.isEmpty {
+                emptyState("No overrides set. Add explicit facts that should always be in your identity.")
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(overrides.enumerated()), id: \.offset) { index, content in
+                        if index > 0 {
+                            Divider().opacity(0.5)
+                        }
+                        MemoryOverrideRow(content: content) {
+                            removeOverride(index: index)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func metadataTag(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(theme.secondaryText)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(theme.tertiaryBackground))
+    }
+
+    private func emptyState(_ key: String.LocalizationValue) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 13))
+                .foregroundColor(theme.tertiaryText)
+            Text(L(key))
+                .font(.system(size: 13))
+                .foregroundColor(theme.tertiaryText)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(theme.inputBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(theme.inputBorder, lineWidth: 1)
+                )
+        )
+    }
+
+    // MARK: - Data
+
+    private func reload() {
+        let db = MemoryDatabase.shared
+        databaseOpen = db.isOpen
+        guard databaseOpen else {
+            identity = nil
+            return
+        }
+        do {
+            identity = try db.loadIdentity()
+            errorMessage = nil
+        } catch {
+            MemoryLogger.database.error("Failed to load identity: \(error)")
+            errorMessage = L("Failed to load identity")
+        }
+    }
+
+    private func saveIdentityEdit(_ content: String) {
+        let tokenCount = max(1, content.count / MemoryConfiguration.charsPerToken)
+        var updated = identity ?? Identity()
+        updated.content = content
+        updated.tokenCount = tokenCount
+        updated.model = "user"
+        updated.generatedAt = Self.iso8601Formatter.string(from: Date())
+        if updated.version == 0 { updated.version = 1 }
+
+        do {
+            try MemoryDatabase.shared.saveIdentity(updated)
+            errorMessage = nil
+        } catch {
+            MemoryLogger.database.error("Failed to save identity: \(error)")
+            errorMessage = L("Failed to save identity")
+        }
+        reload()
+    }
+
+    private func addOverride(_ text: String) {
+        do {
+            try MemoryDatabase.shared.appendIdentityOverride(text)
+            errorMessage = nil
+        } catch {
+            MemoryLogger.database.error("Failed to add override: \(error)")
+            errorMessage = L("Failed to add override")
+        }
+        reload()
+    }
+
+    private func removeOverride(index: Int) {
+        do {
+            try MemoryDatabase.shared.removeIdentityOverride(at: index)
+            errorMessage = nil
+        } catch {
+            MemoryLogger.database.error("Failed to remove override: \(error)")
+            errorMessage = L("Failed to remove override")
+        }
+        reload()
+    }
+}
+
+// MARK: - Statistics Tab
+
+/// Distillation call counts and database size, both already-live reads on
+/// `MemoryDatabase` (`processingStats()`, `databaseSizeBytes()`) — no new
+/// service, no diagnostics dependency.
+private struct MemoryStatisticsTabContent: View {
+    @ObservedObject private var themeManager = ThemeManager.shared
+    private var theme: ThemeProtocol { themeManager.currentTheme }
+
+    @State private var stats = ProcessingStats()
+    @State private var dbSizeBytes: Int64 = 0
+    @State private var errorMessage: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.errorColor)
+                }
+                statsCard
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.primaryBackground)
+        .onAppear(perform: reload)
+    }
+
+    private var statsCard: some View {
+        MemorySectionCard(title: "Statistics", icon: "tablecells") {
+            HStack(spacing: 0) {
+                statBlock(label: "Total Calls", value: "\(stats.totalCalls)")
+                Divider().frame(height: 36).opacity(0.5)
+                statBlock(label: "Avg Latency", value: "\(stats.avgDurationMs)ms")
+                Divider().frame(height: 36).opacity(0.5)
+                statBlock(label: "Success", value: "\(stats.successCount)")
+                Divider().frame(height: 36).opacity(0.5)
+                statBlock(label: "Errors", value: "\(stats.errorCount)")
+                Divider().frame(height: 36).opacity(0.5)
+                statBlock(label: "Database", value: formatBytes(dbSizeBytes))
+            }
+        }
+    }
+
+    private func statBlock(label: String, value: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundColor(theme.primaryText)
+            Text(LocalizedStringKey(label), bundle: .module)
+                .font(.system(size: 11))
+                .foregroundColor(theme.tertiaryText)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(LocalizedStringKey(label), bundle: .module) + Text(": \(value)"))
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+
+    private func reload() {
+        let db = MemoryDatabase.shared
+        guard db.isOpen else {
+            stats = ProcessingStats()
+            dbSizeBytes = 0
+            return
+        }
+        do {
+            stats = try db.processingStats()
+            errorMessage = nil
+        } catch {
+            MemoryLogger.database.error("Failed to load processing stats: \(error)")
+            errorMessage = L("Failed to load statistics")
+        }
+        dbSizeBytes = db.databaseSizeBytes()
+    }
+}
+
+// MARK: - Settings Tab
+
+/// The original four-card Intel settings panel (status / embedding / budget
+/// / danger zone), unchanged in content — only moved under its own tab and,
+/// in `dangerCard`, gated behind a confirmation dialog before it existed.
+private struct MemorySettingsTabContent: View {
+    @ObservedObject private var themeManager = ThemeManager.shared
+    private var theme: ThemeProtocol { themeManager.currentTheme }
+    @Environment(\.themedAlertScope) private var alertScope
 
     @State private var config = MemoryConfigurationStore.load()
     @State private var modelReady = false
@@ -1093,25 +1482,16 @@ struct MemoryView: View {
     @State private var downloadError: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            ManagerHeaderWithActions(
-                title: L("Memory"),
-                subtitle: L(
-                    "On-device semantic memory — your chats are embedded locally and recalled when relevant.")
-            ) {
-                HeaderIconButton("arrow.clockwise", isLoading: false, help: "Refresh") { reload() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                statusCard
+                embeddingCard
+                budgetCard
+                dangerCard
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    statusCard
-                    embeddingCard
-                    budgetCard
-                    dangerCard
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 24)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 24)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.primaryBackground)
@@ -1267,12 +1647,36 @@ struct MemoryView: View {
                         .font(.system(size: 11)).foregroundColor(theme.secondaryText)
                 }
                 Spacer()
-                Button(role: .destructive) { clearMemory() } label: {
+                Button(role: .destructive) { presentClearConfirmation() } label: {
                     Text("Clear", bundle: .module)
                 }
                 .controlSize(.small)
             }
         }
+    }
+
+    // MARK: - Danger Zone Confirmation
+
+    private func presentClearConfirmation() {
+        let requestId = UUID()
+        let scope = alertScope
+        ThemedAlertCenter.shared.present(
+            ThemedAlertRequest(
+                id: requestId,
+                title: L("Clear All Memory?"),
+                message: L(
+                    "This will permanently delete all stored conversation turns and embeddings. This cannot be undone."
+                ),
+                buttons: [
+                    .cancel(L("Cancel")),
+                    .destructive(L("Clear")) {
+                        clearMemory()
+                    },
+                ],
+                onDismiss: { ThemedAlertCenter.shared.dismiss(scope: scope, id: requestId) }
+            ),
+            scope: scope
+        )
     }
 
     // MARK: - Helpers

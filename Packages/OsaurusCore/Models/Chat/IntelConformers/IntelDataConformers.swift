@@ -534,7 +534,129 @@ extension View {
     }
 }
 
-final class MemoryContextAssembler: @unchecked Sendable { static let shared = MemoryContextAssembler(); static func assembleContext(agentId: String = "", config: Any? = nil) async -> Any? { nil } }
+final class MemoryContextAssembler: @unchecked Sendable {
+    static let shared = MemoryContextAssembler()
+
+    /// Best-effort preview of what `MemorySearchService.recall(...)` (the
+    /// real per-turn recall path, `IntelMemoryConformers.swift`, invoked
+    /// from `composeChatContext` in this file) would inject. Feeds
+    /// `ChatView.refreshMemoryTokens()`'s context-budget popover estimate —
+    /// never used to build an actual outgoing prompt.
+    ///
+    /// Previously this hard-returned `nil` unconditionally, so the popover's
+    /// memory row always read 0 tokens even while recall was genuinely
+    /// injecting content via the real send path. That silent-zero bug is
+    /// what this replaces.
+    ///
+    /// LIMITATION, read before treating a mismatch as a new bug: this call
+    /// site has no query string — `refreshMemoryTokens` runs on session
+    /// load / agent switch / config change, not per keystroke, and the
+    /// signature here (fixed by other call sites: `ChatView.swift`,
+    /// `Views/Memory/MemoryView.swift`, `Tests/Memory/MemoryTests.swift`)
+    /// takes no query param to add one. Real recall requires a non-empty
+    /// query and returns `nil` without one (see `MemorySearchService.recall`'s
+    /// own guard) — so an exact estimate is not obtainable here by
+    /// construction, not by omission. What this DOES estimate honestly:
+    ///   - Layer 1 (Identity): query-independent in real recall too —
+    ///     reproduced exactly (same overrides + content, same char caps).
+    ///   - Layers 2-3 (pinned facts / episodes): approximated using the
+    ///     same per-layer counts recall requests (topK 6 / 4), ordered by
+    ///     salience / recency (`MemoryDatabase`'s natural ordering) instead
+    ///     of a real semantic query match — a stand-in for "what's
+    ///     typically available to recall," not "what the next turn's actual
+    ///     query will surface." Can read higher or lower than the real
+    ///     per-turn number.
+    ///   - Layer 4 (raw transcript fallback) is NOT estimated: it is the
+    ///     most query-sensitive layer and the shakiest to fake without one,
+    ///     so it is left out rather than guessed at. The estimate therefore
+    ///     tends to undercount on turns where transcript filler would
+    ///     otherwise be injected — documented instead of hidden.
+    ///
+    /// `agentId` is accepted for call-site parity but intentionally NOT
+    /// used to scope the read: the real send path calls
+    /// `MemorySearchService.shared.recall(agentId: nil, ...)` on purpose
+    /// (`docs/MEMORY_PLAN.md` §1: "Recall ignores agent scoping" is
+    /// documented, deliberate behavior, not a bug for this file to paper
+    /// over). Matching that means every agent's memory contributes to the
+    /// estimate, same as it would to the real injected block.
+    static func assembleContext(agentId: String = "", config: Any? = nil) async -> Any? {
+        let cfg = (config as? MemoryConfiguration) ?? MemoryConfigurationStore.load()
+        guard cfg.enabled else { return nil }
+
+        let db = MemoryDatabase.shared
+        guard db.isOpen else { return nil }
+
+        var charBudget = max(200, cfg.memoryBudgetTokens) * MemoryConfiguration.charsPerToken
+        var blocks: [String] = []
+
+        // Layer 1: Identity — exact reproduction of recall()'s Layer 1.
+        if let identity = try? db.loadIdentity() {
+            var idLines: [String] = []
+            for override in identity.overrides.prefix(12) {
+                let trimmed = override.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                let line = "- \(trimmed)"
+                guard line.count <= charBudget else { break }
+                charBudget -= line.count
+                idLines.append(line)
+            }
+            let content = identity.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !content.isEmpty {
+                let snippet = String(content.prefix(min(charBudget, 600)))
+                if !snippet.isEmpty, snippet.count <= charBudget {
+                    charBudget -= snippet.count
+                    idLines.append(snippet)
+                }
+            }
+            if !idLines.isEmpty {
+                blocks.append("### About you\n" + idLines.joined(separator: "\n"))
+            }
+        }
+
+        // Layer 2: Pinned facts — approximated by salience ordering (no
+        // query available here; see limitation note above).
+        let pinned = (try? db.loadPinnedFacts(agentId: nil, limit: 6)) ?? []
+        let pinnedLines = Self.budgetedLines(
+            pinned.map { "- \($0.content.trimmingCharacters(in: .whitespacesAndNewlines).prefix(220))" },
+            budget: &charBudget)
+        if !pinnedLines.isEmpty {
+            blocks.append("### Things to remember\n" + pinnedLines.joined(separator: "\n"))
+        }
+
+        // Layer 3: Episodes — approximated by recency ordering (same
+        // reasoning as Layer 2).
+        let days = cfg.episodeRetentionDays > 0 ? cfg.episodeRetentionDays : 3650
+        let episodes = (try? db.loadEpisodes(agentId: nil, days: days, limit: 4)) ?? []
+        let episodeLines = Self.budgetedLines(
+            episodes.map {
+                "- [\($0.conversationAt.prefix(10))] \($0.summary.trimmingCharacters(in: .whitespacesAndNewlines).prefix(220))"
+            },
+            budget: &charBudget)
+        if !episodeLines.isEmpty {
+            blocks.append("### Past sessions\n" + episodeLines.joined(separator: "\n"))
+        }
+
+        // Layer 4 (raw transcript fallback) intentionally omitted — see
+        // limitation note above.
+
+        guard !blocks.isEmpty else { return nil }
+        return "## Relevant memory (estimate)\n" + blocks.joined(separator: "\n\n")
+    }
+
+    /// Take candidate lines in order until the shared character budget is
+    /// spent. Mirrors `MemorySearchService.budgetedLines` exactly
+    /// (duplicated rather than shared because that method is `private` on
+    /// a type in a different, excluded-from-editing file).
+    private static func budgetedLines(_ candidates: [String], budget: inout Int) -> [String] {
+        var out: [String] = []
+        for line in candidates where !line.isEmpty {
+            guard line.count <= budget else { break }
+            budget -= line.count
+            out.append(line)
+        }
+        return out
+    }
+}
 // `MemorySearchService` (real Intel implementation) lives in
 // `IntelMemoryConformers.swift` — it embeds transcript turns and does cosine
 // recall over the SQLCipher-backed transcript table.
@@ -1130,7 +1252,19 @@ final class ContextBudgetManager: @unchecked Sendable {
         return total
     }
 
-    static func estimateTokens(for item: Any?) -> Int { 0 }
+    /// Overload for callers whose value is statically typed `Any?` — notably
+    /// `ChatView.refreshMemoryTokens()`, which calls this with
+    /// `MemoryContextAssembler.assembleContext(...)`'s return value. Swift
+    /// binds overloads by the argument's STATIC type, so with this
+    /// hard-returning `0` (as it used to), the `String` overload above was
+    /// unreachable for that value no matter what `assembleContext` returned
+    /// or how big it was: the context-budget popover's memory row was
+    /// wired to always read 0. Unwrap the concrete case that call site
+    /// actually produces and delegate to the real estimator.
+    static func estimateTokens(for item: Any?) -> Int {
+        if let text = item as? String { return estimateTokens(for: text) }
+        return 0
+    }
 }
 
 // M12 Gap 3: the real `ToolEnvelope` (Tools/ToolEnvelope.swift) + the legacy

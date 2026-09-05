@@ -89,6 +89,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
             // before the previous launch ended (closed mid-debounce, quit, crash).
             await MemoryService.shared.recoverOrphanedSignals()
         }
+
+        // Background consolidation: decay, near-duplicate episode merge,
+        // pinned promotion, eviction, and transcript pruning. Never ran on
+        // this fork (see IntelMemoryConsolidator.swift's header for why);
+        // started here, off the main actor, so a slow first pass can never
+        // delay launch. The actor itself gates on `consolidationIntervalHours`
+        // against a persisted last-run timestamp, so this does not mean a
+        // full pass runs on every launch.
+        Task.detached(priority: .background) {
+            await MemoryConsolidator.shared.start()
+        }
         #endif
 
         let launchedByCLI = ProcessInfo.processInfo.arguments.contains("--launched-by-cli")

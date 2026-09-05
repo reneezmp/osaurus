@@ -330,7 +330,11 @@ public actor MemoryService {
     /// Core Model, then the default chat model, and finally the first model any
     /// configured provider discovered — so memory consolidation works against
     /// whatever the user actually chats with, with zero extra setup.
-    private func resolveDistillModel() async -> String? {
+    /// Resolves the model distillation will actually use. Also read by
+    /// `MemoryDiagnostics` so the panel reports the SAME model this actor
+    /// would pick — this was briefly duplicated there, and two copies of a
+    /// resolution chain that must agree is how they drift apart.
+    public func resolveDistillModel() async -> String? {
         let cfg = ChatConfigurationStore.load()
         if let core = cfg.coreModelIdentifier, !core.isEmpty { return core }
         if let def = cfg.defaultModel, !def.isEmpty { return def }

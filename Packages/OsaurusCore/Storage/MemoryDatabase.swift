@@ -1366,6 +1366,53 @@ public final class MemoryDatabase: @unchecked Sendable {
         return results
     }
 
+    /// Episode counts grouped by agent. Added for the diagnostics panel's
+    /// per-agent breakdown — mirrors `agentIdsWithPinnedFacts()` exactly.
+    public func agentIdsWithEpisodes() throws -> [(agentId: String, count: Int)] {
+        var results: [(String, Int)] = []
+        try prepareAndExecute(
+            """
+            SELECT agent_id, COUNT(*) FROM episodes
+            WHERE status = 'active'
+            GROUP BY agent_id
+            ORDER BY 2 DESC
+            """,
+            bind: { _ in },
+            process: { stmt in
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let id = String(cString: sqlite3_column_text(stmt, 0))
+                    let count = Int(sqlite3_column_int(stmt, 1))
+                    results.append((id, count))
+                }
+            }
+        )
+        return results
+    }
+
+    /// Pending (undistilled) signal counts grouped by agent. Added for the
+    /// diagnostics panel's per-agent breakdown — same shape as
+    /// `agentIdsWithPinnedFacts()` / `agentIdsWithEpisodes()`.
+    public func agentIdsWithPendingSignals() throws -> [(agentId: String, count: Int)] {
+        var results: [(String, Int)] = []
+        try prepareAndExecute(
+            """
+            SELECT agent_id, COUNT(*) FROM pending_signals
+            WHERE status = 'pending'
+            GROUP BY agent_id
+            ORDER BY 2 DESC
+            """,
+            bind: { _ in },
+            process: { stmt in
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let id = String(cString: sqlite3_column_text(stmt, 0))
+                    let count = Int(sqlite3_column_int(stmt, 1))
+                    results.append((id, count))
+                }
+            }
+        )
+        return results
+    }
+
     private static let pinnedColumns =
         "id, agent_id, content, salience, source_count, source_episode_id, last_used, use_count, status, created_at, tags_csv"
 
@@ -2581,6 +2628,14 @@ public final class MemoryDatabase: @unchecked Sendable {
     /// (regardless of status). The diagnostics panel uses the all-time
     /// total to distinguish "bufferTurn never reached the database" (= 0)
     /// from "buffered then drained" (= some N with empty `pending`).
+    ///
+    /// `processedSignals` and `deadLetteredSignals` were added for the
+    /// diagnostics panel — `PendingSignalsSummary` already declared these
+    /// fields, but the query below previously left them at their `0`
+    /// default. No write path currently sets `status = 'dead'` (there is
+    /// no dead-letter mechanism yet — that's Phase 2 consolidation work),
+    /// so `deadLetteredSignals` reads `0` honestly today; the column is
+    /// wired so it starts reporting real numbers the moment one exists.
     public func pendingSignalsSummary() throws -> PendingSignalsSummary {
         var summary = PendingSignalsSummary()
         try prepareAndExecute(
@@ -2588,7 +2643,9 @@ public final class MemoryDatabase: @unchecked Sendable {
             SELECT
                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
                 COUNT(DISTINCT CASE WHEN status = 'pending' THEN conversation_id END),
-                COUNT(*)
+                COUNT(*),
+                SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END)
             FROM pending_signals
             """,
             bind: { _ in },
@@ -2598,6 +2655,10 @@ public final class MemoryDatabase: @unchecked Sendable {
                         sqlite3_column_type(stmt, 0) == SQLITE_NULL ? 0 : Int(sqlite3_column_int(stmt, 0))
                     summary.distinctConversations = Int(sqlite3_column_int(stmt, 1))
                     summary.allTimeSignals = Int(sqlite3_column_int(stmt, 2))
+                    summary.processedSignals =
+                        sqlite3_column_type(stmt, 3) == SQLITE_NULL ? 0 : Int(sqlite3_column_int(stmt, 3))
+                    summary.deadLetteredSignals =
+                        sqlite3_column_type(stmt, 4) == SQLITE_NULL ? 0 : Int(sqlite3_column_int(stmt, 4))
                 }
             }
         )
@@ -2653,13 +2714,26 @@ public final class MemoryDatabase: @unchecked Sendable {
         return rows
     }
 
+    /// `ProcessingStats` already declared `skippedCount` / `emptyCount` /
+    /// `deadLetterCount` (for the diagnostics panel's distill-outcome
+    /// breakdown), but this query previously only filled `successCount` /
+    /// `errorCount`, leaving the rest at their `0` default. Extended to
+    /// match every status string `IntelMemoryService.performDistillSession`
+    /// actually logs via `logProcessing`: "success", "error", "skipped",
+    /// "empty". No live path logs "dead" yet (no dead-letter mechanism —
+    /// Phase 2 consolidation work), so `deadLetterCount` reads `0` today;
+    /// the column is wired so it starts reporting real numbers the moment
+    /// one exists, rather than lying by omission.
     public func processingStats() throws -> ProcessingStats {
         var stats = ProcessingStats()
         try prepareAndExecute(
             """
             SELECT COUNT(*), AVG(duration_ms),
                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)
+                   SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status = 'empty' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END)
             FROM processing_log
             """,
             bind: { _ in },
@@ -2670,6 +2744,12 @@ public final class MemoryDatabase: @unchecked Sendable {
                         sqlite3_column_type(stmt, 1) != SQLITE_NULL ? Int(sqlite3_column_int(stmt, 1)) : 0
                     stats.successCount = Int(sqlite3_column_int(stmt, 2))
                     stats.errorCount = Int(sqlite3_column_int(stmt, 3))
+                    stats.skippedCount =
+                        sqlite3_column_type(stmt, 4) == SQLITE_NULL ? 0 : Int(sqlite3_column_int(stmt, 4))
+                    stats.emptyCount =
+                        sqlite3_column_type(stmt, 5) == SQLITE_NULL ? 0 : Int(sqlite3_column_int(stmt, 5))
+                    stats.deadLetterCount =
+                        sqlite3_column_type(stmt, 6) == SQLITE_NULL ? 0 : Int(sqlite3_column_int(stmt, 6))
                 }
             }
         )

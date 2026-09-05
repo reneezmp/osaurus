@@ -791,4 +791,404 @@ struct ContextPreviewSheet: View {
         .environment(\.theme, themeManager.currentTheme)
     }
 }
+#else
+//
+//  MemoryComponents.swift (Intel)
+//
+//  Small reusable pieces for the Intel `MemoryView` tabs (Identity /
+//  Settings / Statistics). Ported from the upstream half of this same
+//  file above — that half never compiles on this fork (see the `#if`
+//  at the top), so these are deliberate, minimal duplicates rather than
+//  shared code: `MemorySectionCard`, `MemorySectionActionButton`,
+//  `MemoryOverrideRow`, `IdentityEditSheet`, and `AddOverrideSheet` carry
+//  no upstream-only dependency (no MLX/VecturaKit types, no two-parameter
+//  `onChange`), so they port unchanged aside from doc comments.
+//
+
+import SwiftUI
+
+func pluralizedMemory(_ count: Int, _ singular: String, _ plural: String? = nil) -> String {
+    count == 1 ? "1 \(singular)" : "\(count) \(plural ?? "\(singular)s")"
+}
+
+// MARK: - Section Card
+
+struct MemorySectionCard<Trailing: View, Content: View>: View {
+    @Environment(\.theme) private var theme
+
+    let title: String
+    let icon: String
+    var count: Int? = nil
+    let trailing: Trailing
+    let content: Content
+
+    init(
+        title: String,
+        icon: String,
+        count: Int? = nil,
+        @ViewBuilder trailing: () -> Trailing,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.icon = icon
+        self.count = count
+        self.trailing = trailing()
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(theme.accentColor)
+                    .frame(width: 20)
+
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(theme.primaryText)
+                    .tracking(0.5)
+
+                if let count {
+                    Text("\(count)", bundle: .module)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(theme.tertiaryBackground))
+                }
+
+                Spacer()
+
+                trailing
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+
+            VStack(alignment: .leading, spacing: 12) {
+                content
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 16)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(theme.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(theme.cardBorder, lineWidth: 1)
+                )
+        )
+    }
+}
+
+extension MemorySectionCard where Trailing == EmptyView {
+    init(
+        title: String,
+        icon: String,
+        count: Int? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.icon = icon
+        self.count = count
+        self.trailing = EmptyView()
+        self.content = content()
+    }
+}
+
+// MARK: - Section Action Button
+
+struct MemorySectionActionButton: View {
+    @Environment(\.theme) private var theme
+
+    let title: String
+    let icon: String?
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    init(_ title: String, icon: String? = nil, action: @escaping () -> Void) {
+        self.title = title
+        self.icon = icon
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                Text(LocalizedStringKey(title), bundle: .module)
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundColor(isHovering ? theme.accentColor : theme.secondaryText)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isHovering ? theme.accentColor.opacity(0.1) : Color.clear)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+    }
+}
+
+// MARK: - Override Row
+
+struct MemoryOverrideRow: View {
+    @Environment(\.theme) private var theme
+
+    let content: String
+    let onDelete: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(theme.accentColor)
+                .frame(width: 6, height: 6)
+
+            Text(content)
+                .font(.system(size: 13))
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(2)
+
+            Spacer()
+
+            if isHovering {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(theme.tertiaryText)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .transition(.opacity)
+            }
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+    }
+}
+
+// MARK: - Identity Edit Sheet
+
+struct IdentityEditSheet: View {
+    let identity: Identity?
+    let onSave: (String) -> Void
+
+    @ObservedObject private var themeManager = ThemeManager.shared
+    private var theme: ThemeProtocol { themeManager.currentTheme }
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var editText: String = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Edit Identity", bundle: .module)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Manually edit the auto-derived identity narrative", bundle: .module)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.tertiaryText)
+                }
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6).fill(theme.tertiaryBackground)
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(20)
+
+            Divider().opacity(0.5)
+
+            TextEditor(text: $editText)
+                .font(.system(size: 13))
+                .padding(12)
+                .scrollContentBackground(.hidden)
+                .background(theme.inputBackground)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+
+            Divider().opacity(0.5)
+
+            HStack {
+                Text(pluralizedMemory(max(1, editText.count / MemoryConfiguration.charsPerToken), "token"))
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.tertiaryText)
+
+                Spacer()
+
+                Button(action: { dismiss() }) {
+                    Text("Cancel", bundle: .module)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(theme.tertiaryBackground)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(theme.inputBorder, lineWidth: 1)
+                                )
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                Button {
+                    onSave(editText)
+                    dismiss()
+                } label: {
+                    Text("Save", bundle: .module)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(theme.accentColor))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .opacity(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.5 : 1)
+            }
+            .padding(20)
+        }
+        .background(theme.primaryBackground)
+        .environment(\.theme, themeManager.currentTheme)
+        .onAppear {
+            editText = identity?.content ?? ""
+        }
+    }
+}
+
+// MARK: - Add Override Sheet
+
+struct AddOverrideSheet: View {
+    let onAdd: (String) -> Void
+
+    @ObservedObject private var themeManager = ThemeManager.shared
+    private var theme: ThemeProtocol { themeManager.currentTheme }
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @FocusState private var isFocused: Bool
+
+    private var trimmedText: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Add Override", bundle: .module)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Enter an explicit fact that should always be in your identity", bundle: .module)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.tertiaryText)
+                }
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6).fill(theme.tertiaryBackground)
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(20)
+
+            Divider().opacity(0.5)
+
+            TextField(text: $text, prompt: Text("e.g., My name is Terence", bundle: .module)) {
+                Text("e.g., My name is Terence", bundle: .module)
+            }
+            .textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .focused($isFocused)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(theme.inputBackground)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(
+                                isFocused ? theme.accentColor.opacity(0.5) : theme.inputBorder,
+                                lineWidth: isFocused ? 1.5 : 1
+                            )
+                    )
+            )
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+
+            Divider().opacity(0.5)
+
+            HStack {
+                Spacer()
+
+                Button(action: { dismiss() }) {
+                    Text("Cancel", bundle: .module)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(theme.tertiaryBackground)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(theme.inputBorder, lineWidth: 1)
+                                )
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                Button {
+                    guard !trimmedText.isEmpty else { return }
+                    onAdd(trimmedText)
+                    dismiss()
+                } label: {
+                    Text("Add", bundle: .module)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(theme.accentColor))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(trimmedText.isEmpty)
+                .opacity(trimmedText.isEmpty ? 0.5 : 1)
+            }
+            .padding(20)
+        }
+        .background(theme.primaryBackground)
+        .environment(\.theme, themeManager.currentTheme)
+        .onAppear { isFocused = true }
+    }
+}
 #endif
