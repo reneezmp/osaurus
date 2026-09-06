@@ -1195,14 +1195,18 @@ final class IntelChatToolbarDelegate: NSObject, NSToolbarDelegate {
     static let agentItem = NSToolbarItem.Identifier("IntelChatToolbar.agent")
     static let actionItem = NSToolbarItem.Identifier("IntelChatToolbar.action")
 
-    /// Layout: sidebar toggle on the leading edge; the back-to-project chip
-    /// sits immediately next to the centered agent pill (no flexible space
-    /// between them) so it reads as the chat's identity chrome rather than
-    /// sidebar chrome. Bug fix: `projectItem` used to sit right after
-    /// `sidebarItem`, far to the left above the sidebar — users didn't
-    /// recognize it as belonging to the chat at all.
+    /// Layout mirrors upstream exactly:
+    ///   [sidebar, project, flexibleSpace, agent, flexibleSpace, action]
+    /// where upstream's equivalent of `projectItem` is its `backItem`.
+    ///
+    /// The agent pill MUST be the only item between the two flexible spaces.
+    /// `centeredItemIdentifier` is set to it, and putting a second item
+    /// inside that group pushes the pill visibly off-centre. An earlier
+    /// change moved `projectItem` next to the pill to make the chip easier
+    /// to find; it did that at the cost of the centring, so the chip is
+    /// back where upstream keeps it, on the leading edge.
     private static let ids: [NSToolbarItem.Identifier] = [
-        sidebarItem, .flexibleSpace, projectItem, agentItem, .flexibleSpace, actionItem,
+        sidebarItem, projectItem, .flexibleSpace, agentItem, .flexibleSpace, actionItem,
     ]
 
     private weak var windowState: ChatWindowState?
