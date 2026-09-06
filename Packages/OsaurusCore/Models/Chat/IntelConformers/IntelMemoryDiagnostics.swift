@@ -102,6 +102,16 @@ public final class MemoryDiagnostics: ObservableObject {
         if let model = await MemoryService.shared.resolveDistillModel(), !model.isEmpty {
             return (model, nil)
         }
+        if let configured = await MemoryService.shared.unresolvedConfiguredModel() {
+            return (
+                nil,
+                "Configured model \"\(configured)\" is not servable by any connected provider — "
+                    + "MLX/local models cannot run on this fork, and no connected provider discovered "
+                    + "that id. Distillation cannot run until it resolves — signals will stay pending. "
+                    + "Pick a model from a connected provider in Settings, or connect the provider "
+                    + "that serves it."
+            )
+        }
         return (
             nil,
             "No core model is configured and no connected provider has discovered any models yet. "

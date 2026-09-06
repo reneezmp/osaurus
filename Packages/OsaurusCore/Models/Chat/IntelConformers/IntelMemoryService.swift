@@ -46,13 +46,14 @@ public actor MemoryService {
     /// `conversationProjectIds`: recorded while the live session
     /// unambiguously knows its project, so `performDistillSession` can
     /// mirror the resulting episode into `MemoryNamespace.project(_:)`
-    /// without needing a session-manager lookup. Unlike upstream, there is
-    /// no manager-lookup fallback for conversations this process never
-    /// buffered (`ChatSessionsManager` is excluded on Intel — see
-    /// Package.swift) — an orphaned/pending signal recovered after a
-    /// relaunch (`recoverOrphanedSignals` → `syncNow`) will distill into
-    /// its agent namespace only, not its project's. Reported as a known
-    /// gap in docs/MEMORY_PLAN.md's Phase 5 write-up.
+    /// without a lookup in the common case.
+    ///
+    /// It does NOT survive a relaunch, so it is a cache, not the source of
+    /// truth — `projectId(for:)` falls back to the persisted session. The
+    /// upstream `Managers/Chat/ChatSessionsManager.swift` is excluded here,
+    /// but `IntelManagerConformers` provides a live replacement that loads
+    /// every session from disk in its initialiser, so the fallback is
+    /// available even during launch-time orphan recovery.
     private var conversationProjectIds: [String: UUID] = [:]
 
     /// Reset on every process launch — see `BufferTurnTelemetry`.
@@ -294,12 +295,28 @@ public actor MemoryService {
         }
 
         guard let model = await resolveDistillModel() else {
-            MemoryLogger.service.warning(
-                "distill: no model available (configure a Core Model in Settings, or add a provider); signals stay pending"
-            )
+            // `resolveDistillModel()` already validated the configured core/
+            // default model against every connected provider's discovered
+            // models and rejected both (or found nothing configured at all).
+            // Naming the specific unservable value here — rather than just
+            // "no model available" — is what makes the skip actionable: the
+            // user picked something real, it just isn't reachable.
+            let configured = await unresolvedConfiguredModel()
+            let detail: String
+            if let configured {
+                detail = "no_model:configured_unservable:\(configured)"
+                MemoryLogger.service.warning(
+                    "distill: no model available — configured model \"\(configured)\" is not servable by any connected provider (pick a servable model, or connect the provider that serves it); signals stay pending"
+                )
+            } else {
+                detail = "no_model"
+                MemoryLogger.service.warning(
+                    "distill: no model available (configure a Core Model in Settings, or add a provider); signals stay pending"
+                )
+            }
             logProcessing(
                 agentId: agentId, taskType: "distill", model: "none",
-                status: "skipped", details: "no_model")
+                status: "skipped", details: detail)
             return
         }
 
@@ -451,13 +468,72 @@ public actor MemoryService {
     /// resolution chain that must agree is how they drift apart.
     public func resolveDistillModel() async -> String? {
         let cfg = ChatConfigurationStore.load()
+        let (servable, bareModels) = await Self.servableModels()
+
+        // `coreModelIdentifier` is built from the Core (local/MLX) model
+        // picker — amputated on Intel (see `IntelManagerConformers.swift`).
+        // Its value (e.g. an MLX HuggingFace repo id like
+        // "mlx-community/Qwen3-8B-4bit") is NOT a remote-provider model and
+        // MLX cannot run on this fork, so it must be validated exactly like
+        // any other candidate rather than trusted just because it's set.
+        if let core = cfg.coreModelIdentifier, !core.isEmpty, servable.contains(core) {
+            return core
+        }
+        if let def = cfg.defaultModel, !def.isEmpty, servable.contains(def) {
+            return def
+        }
+        // Final fallback: whatever a connected provider actually discovered,
+        // so memory works out of the box even with nothing explicitly
+        // configured. Already servable by construction — no validation needed.
+        return bareModels.first
+    }
+
+    /// When `resolveDistillModel()` returns nil, names the configured value
+    /// that was rejected (core model preferred, then default model) — for
+    /// skip-log / diagnostics messages only. Returns nil when nothing was
+    /// configured at all (a "no provider yet" situation, not a
+    /// misconfiguration). Does not re-run the servability check: callers
+    /// only use this after `resolveDistillModel()` has already returned nil,
+    /// at which point any non-empty configured value is unservable by
+    /// definition — reading it back is not a second copy of the chain.
+    public func unresolvedConfiguredModel() async -> String? {
+        let cfg = ChatConfigurationStore.load()
         if let core = cfg.coreModelIdentifier, !core.isEmpty { return core }
         if let def = cfg.defaultModel, !def.isEmpty { return def }
-        // `RemoteProviderManager` is @MainActor-isolated — hop over to read it.
-        return await MainActor.run {
-            RemoteProviderManager.shared.providerStates.values
-                .flatMap { $0.discoveredModels }
-                .first
+        return nil
+    }
+
+    /// The full set of model identifiers any connected remote provider can
+    /// actually serve, in both shapes a caller might have stored: the bare
+    /// id `RemoteProviderManager` discovers (e.g. "deepseek-v4-pro") and the
+    /// "provider-prefix/bare-id" shape `ModelPickerItemCache` / upstream's
+    /// `cachedAvailableModels()` display (built the same way: provider name,
+    /// lowercased, spaces and slashes turned to hyphens). Accepting both
+    /// shapes — without stripping a prefix off the candidate itself — is
+    /// deliberate: guessing which shape a stored identifier is in is exactly
+    /// how a coincidental-looking "org/name" value like an MLX repo id gets
+    /// misread as a servable "provider/model" pair.
+    private static func servableModels() async -> (servable: Set<String>, bareModels: [String]) {
+        // `RemoteProviderManager` is @MainActor-isolated — hop over once.
+        await MainActor.run {
+            let manager = RemoteProviderManager.shared
+            var servable = Set<String>()
+            var bare: [String] = []
+            for provider in manager.configuration.providers {
+                guard let state = manager.providerStates[provider.id],
+                    !state.discoveredModels.isEmpty
+                else { continue }
+                let prefix = provider.name
+                    .lowercased()
+                    .replacingOccurrences(of: " ", with: "-")
+                    .replacingOccurrences(of: "/", with: "-")
+                for modelId in state.discoveredModels {
+                    servable.insert(modelId)
+                    servable.insert("\(prefix)/\(modelId)")
+                    bare.append(modelId)
+                }
+            }
+            return (servable, bare)
         }
     }
 

@@ -1079,13 +1079,17 @@ import SwiftUI
 
 /// Intel memory tab. The upstream `MemoryView` (the `#if !OSAURUS_INTEL` half)
 /// drives the MLX/VecturaKit distillation+episode subsystem; on Intel we expose
-/// the Phase-1 transcript-recall MVP across four tabs:
+/// the Phase-1 transcript-recall MVP, mirroring upstream's tab order
+/// (Identity, Memories, Agents, Settings, Diagnostics — no separate
+/// Statistics tab, see below):
 ///  - **Identity**: the auto-derived identity narrative (written by
-///    `IntelMemoryService.applyIdentityDelta`) plus user overrides.
-///  - **Settings**: master toggle, embedding-backend picker (off / on-device
-///    static model2vec / cloud), recall budget, consolidation interval, and
-///    clear-memory.
-///  - **Statistics**: distillation call counts and database size.
+///    `IntelMemoryService.applyIdentityDelta`) plus user overrides, and the
+///    "Distill pending" / "Sync" actions (both `MemoryService.syncNow(force:)`).
+///  - **Settings**: statistics section, master toggle, embedding-backend
+///    picker (off / on-device static model2vec / cloud), recall budget,
+///    consolidation interval, and clear-memory. Statistics lives here, at
+///    the top, rather than as its own tab — matching upstream, which has no
+///    Statistics tab at all.
 ///  - **Diagnostics**: pipeline health, bound to `MemoryDiagnostics.shared`
 ///    (`Models/Chat/IntelConformers/IntelMemoryDiagnostics.swift`) — see
 ///    `MemoryDiagnosticsViews.swift`'s `#else` branch for the view content.
@@ -1096,7 +1100,6 @@ enum MemoryTab: String, CaseIterable, AnimatedTabItem {
     case memories = "Memories"
     case agents = "Agents"
     case settings = "Settings"
-    case statistics = "Statistics"
     case diagnostics = "Diagnostics"
 
     var title: String {
@@ -1105,7 +1108,6 @@ enum MemoryTab: String, CaseIterable, AnimatedTabItem {
         case .memories: return L("Memories")
         case .agents: return L("Agents")
         case .settings: return L("Settings")
-        case .statistics: return L("Statistics")
         case .diagnostics: return L("Diagnostics")
         }
     }
@@ -1135,8 +1137,6 @@ struct MemoryView: View {
                     MemoryAgentsTabContent()
                 case .settings:
                     MemorySettingsTabContent()
-                case .statistics:
-                    MemoryStatisticsTabContent()
                 case .diagnostics:
                     MemoryDiagnosticsTabContent()
                 }
@@ -1184,6 +1184,15 @@ private struct MemoryIdentityTabContent: View {
     @State private var showAddOverride = false
     @State private var errorMessage: String?
 
+    // "Distill pending" / "Sync" (Bug 2 — ported from upstream, which wires
+    // both to `MemoryService.syncNow(force: true)`; on Intel there's no MLX
+    // residency gate to bypass, so the two behave the same, same as
+    // `MemoryService`'s own doc comment on `syncNow` notes).
+    @State private var config = MemoryConfigurationStore.load()
+    @State private var isDistilling = false
+    @State private var isSyncing = false
+    @State private var actionStatus: String?
+
     private static let iso8601Formatter = ISO8601DateFormatter()
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -1225,10 +1234,42 @@ private struct MemoryIdentityTabContent: View {
 
     private var identityCard: some View {
         MemorySectionCard(title: "Identity", icon: "person.fill") {
+            // Ported from upstream's Identity card header (the
+            // `#if !OSAURUS_INTEL` half of this file, `identitySection`):
+            // "Distill pending", "Sync", "Edit". Both distill actions go
+            // through `MemoryService.syncNow(force: true)` — see that
+            // method's doc comment for why both behave the same on Intel.
+            MemorySectionActionButton(
+                isDistilling ? "Distilling..." : "Distill pending",
+                icon: "wand.and.stars"
+            ) {
+                runDistillPending()
+            }
+            .disabled(isDistilling || !config.enabled)
+
+            MemorySectionActionButton(
+                isSyncing ? "Syncing..." : "Sync",
+                icon: "arrow.triangle.2.circlepath"
+            ) {
+                runSync()
+            }
+            .disabled(isSyncing || !config.enabled)
+
             MemorySectionActionButton("Edit", icon: "pencil") {
                 showEditSheet = true
             }
         } content: {
+            if let actionStatus {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.successColor)
+                    Text(actionStatus)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                }
+                .transition(.opacity)
+            }
             if let identity, !identity.content.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(identity.content)
@@ -1335,6 +1376,7 @@ private struct MemoryIdentityTabContent: View {
     // MARK: - Data
 
     private func reload() {
+        config = MemoryConfigurationStore.load()
         let db = MemoryDatabase.shared
         databaseOpen = db.isOpen
         guard databaseOpen else {
@@ -1347,6 +1389,45 @@ private struct MemoryIdentityTabContent: View {
         } catch {
             MemoryLogger.database.error("Failed to load identity: \(error)")
             errorMessage = L("Failed to load identity")
+        }
+    }
+
+    /// "Distill pending" — mirrors upstream's `runDistillPending()`
+    /// (identical body: `syncNow(force: true)`, reload, toast/status).
+    private func runDistillPending() {
+        guard !isDistilling else { return }
+        isDistilling = true
+        Task {
+            await MemoryService.shared.syncNow(force: true)
+            await MainActor.run {
+                reload()
+                isDistilling = false
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    actionStatus = L("Pending distillation complete")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    withAnimation(.easeInOut(duration: 0.2)) { actionStatus = nil }
+                }
+            }
+        }
+    }
+
+    /// "Sync" — mirrors upstream's inline `syncNow(force: true)` call.
+    private func runSync() {
+        guard !isSyncing else { return }
+        isSyncing = true
+        Task {
+            await MemoryService.shared.syncNow(force: true)
+            await MainActor.run {
+                reload()
+                isSyncing = false
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    actionStatus = L("Sync complete")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    withAnimation(.easeInOut(duration: 0.2)) { actionStatus = nil }
+                }
+            }
         }
     }
 
@@ -1392,36 +1473,70 @@ private struct MemoryIdentityTabContent: View {
     }
 }
 
-// MARK: - Statistics Tab
+// Statistics is no longer its own tab (Bug 3) — upstream has no Statistics
+// tab; it's a section at the top of Settings. See `MemorySettingsTabContent`
+// (statsCard, above statusCard) for the ported content. The former
+// `MemoryStatisticsTabContent` struct was deleted rather than left orphaned.
 
-/// Distillation call counts and database size, both already-live reads on
-/// `MemoryDatabase` (`processingStats()`, `databaseSizeBytes()`) — no new
-/// service, no diagnostics dependency.
-private struct MemoryStatisticsTabContent: View {
+// MARK: - Settings Tab
+
+/// The original four-card Intel settings panel (status / embedding / budget
+/// / danger zone), unchanged in content — only moved under its own tab and,
+/// in `dangerCard`, gated behind a confirmation dialog before it existed.
+private struct MemorySettingsTabContent: View {
     @ObservedObject private var themeManager = ThemeManager.shared
     private var theme: ThemeProtocol { themeManager.currentTheme }
+    @Environment(\.themedAlertScope) private var alertScope
 
+    @State private var config = MemoryConfigurationStore.load()
+    @State private var modelReady = false
+    @State private var isDownloading = false
+    @State private var downloadError: String?
+    @State private var isConsolidating = false
+    @State private var consolidationJustRan = false
+    @ObservedObject private var agentManager = AgentManager.shared
+
+    // Statistics (Bug 3 — no longer its own tab; upstream keeps this as a
+    // section at the top of Settings, above Configuration/Danger Zone).
     @State private var stats = ProcessingStats()
     @State private var dbSizeBytes: Int64 = 0
-    @State private var errorMessage: String?
+
+    // Distillation model resolution (Bug 1) — populated by
+    // `reloadDistillModelStatus()`, never re-derived inline in the view.
+    @State private var distillModelName: String?
+    @State private var distillModelConfiguredButUnservable: String?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.system(size: 12))
-                        .foregroundColor(theme.errorColor)
-                }
                 statsCard
+                statusCard
+                distillationCard
+                embeddingCard
+                budgetCard
+                dangerCard
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 24)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.primaryBackground)
-        .onAppear(perform: reload)
+        .onAppear {
+            reload()
+            reloadDistillModelStatus()
+        }
     }
+
+    // MARK: - Statistics Card
+    //
+    // Ported from the now-deleted `MemoryStatisticsTabContent` (see Bug 3):
+    // upstream has no separate Statistics tab — statistics is a section at
+    // the top of Settings. "tablecells" (not upstream's "chart.bar") is kept
+    // deliberately: it is already compiled, ungated, and proven safe
+    // elsewhere in this fork's Views/ tree (this exact card, pre-move);
+    // "chart.bar" is flagged as unproven macOS-13 risk in
+    // docs/MEMORY_PLAN.md's standing constraints.
 
     private var statsCard: some View {
         MemorySectionCard(title: "Statistics", icon: "tablecells") {
@@ -1457,60 +1572,6 @@ private struct MemoryStatisticsTabContent: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
-    }
-
-    private func reload() {
-        let db = MemoryDatabase.shared
-        guard db.isOpen else {
-            stats = ProcessingStats()
-            dbSizeBytes = 0
-            return
-        }
-        do {
-            stats = try db.processingStats()
-            errorMessage = nil
-        } catch {
-            MemoryLogger.database.error("Failed to load processing stats: \(error)")
-            errorMessage = L("Failed to load statistics")
-        }
-        dbSizeBytes = db.databaseSizeBytes()
-    }
-}
-
-// MARK: - Settings Tab
-
-/// The original four-card Intel settings panel (status / embedding / budget
-/// / danger zone), unchanged in content — only moved under its own tab and,
-/// in `dangerCard`, gated behind a confirmation dialog before it existed.
-private struct MemorySettingsTabContent: View {
-    @ObservedObject private var themeManager = ThemeManager.shared
-    private var theme: ThemeProtocol { themeManager.currentTheme }
-    @Environment(\.themedAlertScope) private var alertScope
-
-    @State private var config = MemoryConfigurationStore.load()
-    @State private var modelReady = false
-    @State private var isDownloading = false
-    @State private var downloadError: String?
-    @State private var isConsolidating = false
-    @State private var consolidationJustRan = false
-    @ObservedObject private var agentManager = AgentManager.shared
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                statusCard
-                distillationCard
-                embeddingCard
-                budgetCard
-                dangerCard
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 24)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.primaryBackground)
-        .onAppear { reload() }
     }
 
     // MARK: - Cards
@@ -1761,6 +1822,28 @@ private struct MemorySettingsTabContent: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Capsule().fill(theme.primaryBackground.opacity(0.6)))
+                } else if let unservable = distillModelConfiguredButUnservable {
+                    // The user picked something real — say so plainly rather
+                    // than silently falling through to "no model configured".
+                    // Most common cause on this fork: the Core Model picker is
+                    // the amputated MLX/local picker, so its value (an MLX
+                    // repo id) can never be servable by a remote provider.
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(theme.warningColor)
+                            Text(verbatim: unservable)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(theme.warningColor)
+                        }
+                        Text(
+                            "That model isn't reachable by any connected provider, so distillation can't run. Pick a model a connected provider actually serves, or connect the provider that serves this one.",
+                            bundle: .module
+                        )
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText.opacity(0.8))
+                    }
                 } else {
                     Text(
                         "No model is configured, so nothing can be distilled yet.",
@@ -1808,15 +1891,27 @@ private struct MemorySettingsTabContent: View {
         }
     }
 
-    /// The model distillation would actually use. Mirrors the head of
-    /// `MemoryService.resolveDistillModel()`'s chain; the provider-discovery
-    /// fallback is omitted because naming a model the user never chose would
-    /// be more misleading here than saying nothing.
-    private var distillModelName: String? {
-        let cfg = ChatConfigurationStore.load()
-        if let core = cfg.coreModelIdentifier, !core.isEmpty { return core }
-        if let def = cfg.defaultModel, !def.isEmpty { return def }
-        return nil
+    /// Refreshes `distillModelName` / `distillModelConfiguredButUnservable`
+    /// by asking `MemoryService.resolveDistillModel()` directly — the same
+    /// validated chain distillation itself uses — rather than re-deriving
+    /// config lookups here. That used to be duplicated (an unvalidated
+    /// `cfg.coreModelIdentifier ?? cfg.defaultModel` chain that could name a
+    /// model the pipeline would actually reject), which is exactly how the
+    /// panel and the pipeline disagreed. `unresolvedConfiguredModel()` only
+    /// runs after a nil result, purely to name what was rejected — it does
+    /// not re-validate anything.
+    private func reloadDistillModelStatus() {
+        Task {
+            let resolved = await MemoryService.shared.resolveDistillModel()
+            let unservable =
+                resolved == nil
+                ? await MemoryService.shared.unresolvedConfiguredModel()
+                : nil
+            await MainActor.run {
+                distillModelName = resolved
+                distillModelConfiguredButUnservable = unservable
+            }
+        }
     }
 
     // MARK: - Danger Zone Confirmation
@@ -1887,6 +1982,9 @@ private struct MemorySettingsTabContent: View {
     private func reload() {
         config = MemoryConfigurationStore.load()
         modelReady = StaticEmbeddingModel.isAvailable
+        let db = MemoryDatabase.shared
+        stats = db.isOpen ? ((try? db.processingStats()) ?? ProcessingStats()) : ProcessingStats()
+        dbSizeBytes = db.databaseSizeBytes()
     }
 
     private func downloadModel() {
