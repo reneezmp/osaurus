@@ -1093,6 +1093,8 @@ import SwiftUI
 /// `StaticEmbedder` or an OpenAI-compatible cloud API.
 enum MemoryTab: String, CaseIterable, AnimatedTabItem {
     case identity = "Identity"
+    case memories = "Memories"
+    case agents = "Agents"
     case settings = "Settings"
     case statistics = "Statistics"
     case diagnostics = "Diagnostics"
@@ -1100,6 +1102,8 @@ enum MemoryTab: String, CaseIterable, AnimatedTabItem {
     var title: String {
         switch self {
         case .identity: return L("Identity")
+        case .memories: return L("Memories")
+        case .agents: return L("Agents")
         case .settings: return L("Settings")
         case .statistics: return L("Statistics")
         case .diagnostics: return L("Diagnostics")
@@ -1125,6 +1129,10 @@ struct MemoryView: View {
                 switch selectedTab {
                 case .identity:
                     MemoryIdentityTabContent()
+                case .memories:
+                    MemoryConsoleTabContent()
+                case .agents:
+                    MemoryAgentsTabContent()
                 case .settings:
                     MemorySettingsTabContent()
                 case .statistics:

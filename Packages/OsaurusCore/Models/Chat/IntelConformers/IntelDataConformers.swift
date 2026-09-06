@@ -1698,9 +1698,16 @@ final class SystemPromptComposer: @unchecked Sendable {
             // Search across all agents (agentId: nil) so recall works regardless
             // of how the transcript/episode agent id was stamped; per-agent
             // scoping is a later refinement.
+            //
+            // `projectId` additionally opens the project's own namespace as a
+            // second lane, mirroring upstream: a chat inside a project recalls
+            // what the whole project has learned, floored at a share of the
+            // budget and deduped against what the agent lane already surfaced.
+            // It is additive — passing nil keeps the previous behaviour exactly.
             let days = memCfg.episodeRetentionDays > 0 ? memCfg.episodeRetentionDays : 3650
             memorySection = await MemorySearchService.shared.recall(
-                query: q, agentId: nil, days: days, budgetTokens: memCfg.memoryBudgetTokens)
+                query: q, agentId: nil, projectId: projectId, days: days,
+                budgetTokens: memCfg.memoryBudgetTokens)
         }
 
         // Project instructions: shared free-form context for every chat in a

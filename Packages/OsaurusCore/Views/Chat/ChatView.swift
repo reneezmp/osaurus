@@ -1764,6 +1764,15 @@ final class ChatSession: ObservableObject {
         let userContent: String
         let memoryAgentId: String
         let memoryConversationId: String
+        /// Project this chat belongs to, if any — captured at run-start
+        /// alongside the other memory fields so the completion handler
+        /// (which may run detached, off the main actor) doesn't need to
+        /// touch `@Published var projectId` itself. Threading this through
+        /// (rather than overwriting `memoryAgentId`) keeps the existing
+        /// per-agent memory-toggle check below untouched: writes route to
+        /// the project namespace additively, they don't replace the
+        /// agent's own.
+        let projectId: UUID?
     }
 
     private func isRunActive(_ runId: UUID) -> Bool {
@@ -1978,6 +1987,20 @@ final class ChatSession: ObservableObject {
                     agentId: aid
                 )
                 await MemorySearchService.shared.indexTranscriptTurn(userTurn)
+                // Project memory (Phase 5): additively mirror the same turn
+                // into the project's shared namespace, on top of the
+                // agent-namespace write above.
+                if let projectId = context.projectId {
+                    await MemoryService.shared.mirrorTranscriptToProject(
+                        projectId: projectId,
+                        conversationId: convId,
+                        chunkIndex: userChunkIndex,
+                        role: "user",
+                        content: userContent,
+                        tokenCount: userTokenCount,
+                        title: conversationTitle
+                    )
+                }
             }
 
             if let assistantContent, !assistantContent.isEmpty {
@@ -2006,6 +2029,17 @@ final class ChatSession: ObservableObject {
                         agentId: aid
                     )
                     await MemorySearchService.shared.indexTranscriptTurn(assistantTurn)
+                    if let projectId = context.projectId {
+                        await MemoryService.shared.mirrorTranscriptToProject(
+                            projectId: projectId,
+                            conversationId: convId,
+                            chunkIndex: chunkIdx,
+                            role: "assistant",
+                            content: assistantContent,
+                            tokenCount: assistantTokenCount,
+                            title: conversationTitle
+                        )
+                    }
                 }
             }
         }
@@ -2020,7 +2054,8 @@ final class ChatSession: ObservableObject {
                     assistantMessage: assistantContent,
                     agentId: context.memoryAgentId,
                     conversationId: context.memoryConversationId,
-                    sessionDate: today
+                    sessionDate: today,
+                    projectId: context.projectId
                 )
             }
         }
@@ -2331,7 +2366,8 @@ final class ChatSession: ObservableObject {
                 hasContent: hasContent,
                 userContent: trimmed,
                 memoryAgentId: memoryAgentId,
-                memoryConversationId: memoryConversationId
+                memoryConversationId: memoryConversationId,
+                projectId: projectId
             )
         )
 

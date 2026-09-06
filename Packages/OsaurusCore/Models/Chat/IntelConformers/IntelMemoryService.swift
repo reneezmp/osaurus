@@ -41,6 +41,19 @@ public actor MemoryService {
     private var debounceTasks: [String: Task<Void, Never>] = [:]
     private var activeConversation: [String: String] = [:]
     private var conversationSessionDates: [String: String] = [:]
+    /// Project membership captured at `bufferTurn` time (Phase 5 — project
+    /// memory), keyed by conversation id. Mirrors upstream's
+    /// `conversationProjectIds`: recorded while the live session
+    /// unambiguously knows its project, so `performDistillSession` can
+    /// mirror the resulting episode into `MemoryNamespace.project(_:)`
+    /// without needing a session-manager lookup. Unlike upstream, there is
+    /// no manager-lookup fallback for conversations this process never
+    /// buffered (`ChatSessionsManager` is excluded on Intel — see
+    /// Package.swift) — an orphaned/pending signal recovered after a
+    /// relaunch (`recoverOrphanedSignals` → `syncNow`) will distill into
+    /// its agent namespace only, not its project's. Reported as a known
+    /// gap in docs/MEMORY_PLAN.md's Phase 5 write-up.
+    private var conversationProjectIds: [String: UUID] = [:]
 
     /// Reset on every process launch — see `BufferTurnTelemetry`.
     private var telemetry = BufferTurnTelemetry()
@@ -60,7 +73,8 @@ public actor MemoryService {
         assistantMessage: String?,
         agentId: String,
         conversationId: String,
-        sessionDate: String? = nil
+        sessionDate: String? = nil,
+        projectId: UUID? = nil
     ) async {
         telemetry.attempts += 1
         telemetry.lastAttemptAt = Date()
@@ -116,6 +130,11 @@ public actor MemoryService {
         if let sessionDate, !sessionDate.isEmpty {
             conversationSessionDates[conversationId] = sessionDate
         }
+        // Capture project membership at buffer time (see
+        // `conversationProjectIds`) — reflects the live value exactly, set
+        // when in a project, cleared when not, so a chat moved out of a
+        // project stops mirroring to it.
+        conversationProjectIds[conversationId] = projectId
 
         // Session change → flush the previous conversation.
         let previous = activeConversation[agentId]
@@ -151,6 +170,51 @@ public actor MemoryService {
         debounceTasks[conversationId] = Task { [weak self] in
             await self?.distillSession(agentId: agentId, conversationId: conversationId)
         }
+    }
+
+    /// Immediately mirror a raw transcript turn into a project's shared
+    /// memory namespace, so a fact stated in a project chat is recallable
+    /// across the whole project the moment it's sent, without waiting on
+    /// background distillation. No LLM call — this is the write half of
+    /// "immediate" project memory (mirrors upstream
+    /// `mirrorTranscriptToProject`). Runs for every project chat regardless
+    /// of the agent's own memory toggle (projects always share), but stays
+    /// under the global memory switch. Best-effort; failures are logged.
+    public func mirrorTranscriptToProject(
+        projectId: UUID,
+        conversationId: String,
+        chunkIndex: Int,
+        role: String,
+        content: String,
+        tokenCount: Int,
+        title: String?
+    ) async {
+        guard MemoryConfigurationStore.load().enabled else { return }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let namespaceKey = MemoryNamespace.project(projectId).key
+        do {
+            try db.insertTranscriptTurn(
+                agentId: namespaceKey,
+                conversationId: conversationId,
+                chunkIndex: chunkIndex,
+                role: role,
+                content: content,
+                tokenCount: tokenCount,
+                title: title
+            )
+        } catch {
+            MemoryLogger.database.warning("project transcript mirror insert failed: \(error)")
+        }
+        let turn = TranscriptTurn(
+            conversationId: conversationId,
+            chunkIndex: chunkIndex,
+            role: role,
+            content: content,
+            tokenCount: tokenCount,
+            agentId: namespaceKey
+        )
+        await MemorySearchService.shared.indexTranscriptTurn(turn)
     }
 
     /// Distill every pending conversation. `force` is kept for call-site parity
@@ -340,6 +404,16 @@ public actor MemoryService {
             let storedPinned = await persistPinnedCandidates(
                 parsed.pinnedCandidates, agentId: agentId, episodeId: episodeId)
 
+            // Shared project memory (Phase 5): mirror the distilled episode
+            // (and pinned candidates) into the chat's project namespace, so
+            // every chat in the project can recall it too. Additive and
+            // best-effort — never affects the agent-namespace outcome above.
+            await mirrorDistillateToProject(
+                episode: ep,
+                pinnedCandidates: parsed.pinnedCandidates,
+                conversationId: conversationId
+            )
+
             // Apply identity delta: append new identity-grade facts to overrides.
             if !parsed.identityFacts.isEmpty {
                 applyIdentityDelta(
@@ -402,6 +476,59 @@ public actor MemoryService {
         )
         let response = try await engine.completeChat(request: request)
         return response.choices.first?.message?.content ?? ""
+    }
+
+    // MARK: - Project Memory Mirror
+
+    /// Resolves which project a conversation belongs to.
+    ///
+    /// The in-memory map is authoritative while the app is running, but it
+    /// does not survive a relaunch — so a signal left pending across a quit
+    /// and later drained by `syncNow`/`recoverOrphanedSignals` would mirror
+    /// to its agent namespace only, silently missing the project pool it was
+    /// written for. `memoryConversationId` is the chat session's own id
+    /// (see `ChatView`), so the persisted session is a reliable fallback.
+    private func projectId(for conversationId: String) async -> UUID? {
+        if let known = conversationProjectIds[conversationId] { return known }
+        guard let sessionId = UUID(uuidString: conversationId) else { return nil }
+        return await MainActor.run {
+            ChatSessionsManager.shared.sessions[sessionId]?.projectId
+        }
+    }
+
+    /// Mirror a just-distilled episode into its chat's project namespace
+    /// (`project-<uuid>`), when the chat belongs to one. Membership prefers
+    /// the value captured at `bufferTurn` time (`conversationProjectIds`),
+    /// then falls back to the persisted session — see `projectId(for:)`.
+    /// Best-effort: failures are logged and swallowed, and must never affect
+    /// the agent-namespace outcome `performDistillSession` already committed
+    /// above this call.
+    private func mirrorDistillateToProject(
+        episode: Episode,
+        pinnedCandidates: [DistillResult.PinnedCandidate],
+        conversationId: String
+    ) async {
+        guard let projectId = await projectId(for: conversationId) else { return }
+        let namespaceKey = MemoryNamespace.project(projectId).key
+
+        var mirrored = episode
+        mirrored.id = 0
+        mirrored.agentId = namespaceKey
+        do {
+            let mirroredId = try db.insertEpisode(mirrored)
+            mirrored.id = mirroredId
+            await MemorySearchService.shared.indexEpisode(mirrored)
+            // Same promotion/dedupe pass as the agent namespace, scoped to
+            // the project's own existing facts.
+            let pinned = await persistPinnedCandidates(
+                pinnedCandidates, agentId: namespaceKey, episodeId: mirroredId)
+            MemoryLogger.service.info(
+                "distill: mirrored episode #\(mirroredId) (+\(pinned) pinned) to project namespace"
+            )
+        } catch {
+            MemoryLogger.service.error(
+                "distill: project mirror failed for \(conversationId): \(error)")
+        }
     }
 
     // MARK: - Pinned Candidates

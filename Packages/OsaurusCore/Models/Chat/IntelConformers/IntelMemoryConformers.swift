@@ -199,15 +199,28 @@ final class MemorySearchService: @unchecked Sendable {
     ///      that haven't been distilled yet).
     ///
     /// Returns nil when memory is off, the query is empty, or nothing matched.
+    ///
+    /// `projectId`, when passed, adds a second additive lane over the
+    /// `project-<uuid>` namespace (Phase 5 — project memory), mirroring
+    /// upstream's `appendProjectMemory`: the agent's own lane is assembled
+    /// first and unchanged; the project lane gets whatever budget is left,
+    /// floored at a quarter of the total so a memory-heavy agent can't
+    /// starve it, and near-duplicate lines already surfaced by the agent
+    /// lane are dropped (Jaccard > 0.85). Defaulted to nil so the existing
+    /// call site in `IntelDataConformers.swift` (`composeChatContext`,
+    /// which already threads a `projectId` for the separate "Project
+    /// Instructions" block) compiles and behaves unchanged until it is
+    /// updated to also pass it here — see docs/MEMORY_PLAN.md §3.
     func recall(
-        query: String, agentId: String? = nil, days: Int, budgetTokens: Int
+        query: String, agentId: String? = nil, projectId: UUID? = nil, days: Int, budgetTokens: Int
     ) async -> String? {
         let cfg = MemoryConfigurationStore.load()
         guard cfg.enabled else { return nil }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return nil }
 
-        var charBudget = max(200, budgetTokens) * MemoryConfiguration.charsPerToken
+        let totalCharBudget = max(200, budgetTokens) * MemoryConfiguration.charsPerToken
+        var charBudget = totalCharBudget
         var blocks: [String] = []
 
         // Layer 1: Identity (overrides + auto-derived content).
@@ -268,8 +281,79 @@ final class MemorySearchService: @unchecked Sendable {
             }
         }
 
+        // Project lane (additive, Phase 5): every chat in a project also
+        // recalls that project's shared `project-<uuid>` namespace, on top
+        // of the agent's own memory above — mirrors upstream's
+        // `appendProjectMemory`. Budget floored at 1/4 of the total so the
+        // agent lane can't starve it entirely, but otherwise gets whatever
+        // the agent lane left unspent.
+        if let projectId {
+            var projectCharBudget = max(totalCharBudget / 4, charBudget)
+            let namespaceKey = MemoryNamespace.project(projectId).key
+            let alreadyShown = blocks.flatMap { $0.split(separator: "\n") }
+                .map { TextSimilarity.tokenize(String($0)) }
+
+            var projectBlocks: [String] = []
+
+            let pinnedP = await searchPinnedFacts(query: q, agentId: namespaceKey, topK: 6)
+            let pinnedPLines = Self.budgetedDedupedLines(
+                pinnedP.map { "- \($0.content.trimmingCharacters(in: .whitespacesAndNewlines).prefix(220))" },
+                budget: &projectCharBudget, against: alreadyShown)
+            if !pinnedPLines.isEmpty {
+                projectBlocks.append(pinnedPLines.joined(separator: "\n"))
+            }
+
+            let episodesP = await searchEpisodes(query: q, agentId: namespaceKey, days: days, topK: 4)
+            let episodePLines = Self.budgetedDedupedLines(
+                episodesP.map {
+                    "- [\($0.conversationAt.prefix(10))] \($0.summary.trimmingCharacters(in: .whitespacesAndNewlines).prefix(220))"
+                },
+                budget: &projectCharBudget, against: alreadyShown)
+            if !episodePLines.isEmpty {
+                projectBlocks.append(episodePLines.joined(separator: "\n"))
+            }
+
+            if projectCharBudget > 200 {
+                let turnsP = await searchTranscript(query: q, agentId: namespaceKey, days: days, topK: 4)
+                let turnPLines = Self.budgetedDedupedLines(
+                    turnsP.map {
+                        let role = $0.role == "user" ? "You" : "Assistant"
+                        return "- \(role): \($0.content.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))"
+                    },
+                    budget: &projectCharBudget, against: alreadyShown)
+                if !turnPLines.isEmpty {
+                    projectBlocks.append(turnPLines.joined(separator: "\n"))
+                }
+            }
+
+            if !projectBlocks.isEmpty {
+                blocks.append("### Project memory\n" + projectBlocks.joined(separator: "\n"))
+            }
+        }
+
         guard !blocks.isEmpty else { return nil }
         return "## Relevant memory\n" + blocks.joined(separator: "\n\n")
+    }
+
+    /// Same as `budgetedLines`, but additionally skips a candidate whose
+    /// token set is near-identical (Jaccard > 0.85) to any line already
+    /// shown by the agent lane — so a fact distilled into both the agent's
+    /// own namespace and its project's namespace isn't echoed twice.
+    private static func budgetedDedupedLines(
+        _ candidates: [String], budget: inout Int, against alreadyShown: [Set<String>]
+    ) -> [String] {
+        var out: [String] = []
+        for line in candidates where !line.isEmpty {
+            guard line.count <= budget else { break }
+            let tokens = TextSimilarity.tokenize(line)
+            let isDuplicate = alreadyShown.contains {
+                TextSimilarity.jaccardTokenized($0, tokens) > 0.85
+            }
+            guard !isDuplicate else { continue }
+            budget -= line.count
+            out.append(line)
+        }
+        return out
     }
 
     /// Take candidate lines in order until the shared character budget is spent.
