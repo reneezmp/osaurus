@@ -1191,4 +1191,299 @@ struct AddOverrideSheet: View {
         .onAppear { isFocused = true }
     }
 }
+
+// MARK: - Agent Color
+
+// `fileprivate` per-file duplicate rather than a shared internal helper —
+// this fork already carries one such copy per call site (`AgentsView.swift`,
+// `ChatEmptyState.swift`, `SharedHeaderComponents.swift`) to avoid a
+// module-scope redeclaration clash now that every Views/ file compiles into
+// one Intel target. Same reasoning, same body.
+fileprivate func agentColorFor(_ name: String) -> Color {
+    let hue = Double(abs(name.hashValue % 360)) / 360.0
+    return Color(hue: hue, saturation: 0.6, brightness: 0.8)
+}
+
+// MARK: - Agent Row (Agents tab)
+
+/// One custom agent's row in the Memory view's Agents tab. Ported from
+/// upstream's `MemoryAgentRow` verbatim (colored dot, description subtitle,
+/// memory-count pill, eye preview, chevron drill-in) — the Default agent
+/// does NOT use this row; it gets its own summary row in
+/// `MemoryNamespacesView.swift` (upstream special-cases it the same way:
+/// `agentMemoryCounts` excludes the Default agent's id, see
+/// `docs/MEMORY_PLAN.md`'s recon notes).
+struct MemoryAgentRow: View {
+    @Environment(\.theme) private var theme
+
+    let agent: Agent
+    let count: Int
+    let onSelect: () -> Void
+    let onPreviewContext: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onSelect) {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(agentColorFor(agent.name))
+                        .frame(width: 8, height: 8)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(agent.displayName)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+
+                        if !agent.description.isEmpty {
+                            Text(agent.description)
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.tertiaryText)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer()
+
+                    Text(pluralizedMemory(count, "memory", "memories"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(theme.tertiaryBackground))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Button(action: onPreviewContext) {
+                Image(systemName: "eye")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(theme.tertiaryText)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(theme.tertiaryBackground)
+                    )
+            }
+            .buttonStyle(PlainButtonStyle())
+            .localizedHelp("Preview context for this agent")
+
+            Button(action: onSelect) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(theme.tertiaryText)
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isHovering ? theme.accentColor.opacity(0.06) : Color.clear)
+        )
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+    }
+}
+
+// MARK: - Project Row (Agents tab)
+
+/// Row for a shared project-memory namespace in the Memory view's Agents
+/// tab. `name` nil means the project record is gone (orphaned namespace) —
+/// the row says so and Forget doubles as cleanup. Ported from upstream's
+/// `MemoryProjectRow` verbatim.
+struct MemoryProjectRow: View {
+    @Environment(\.theme) private var theme
+
+    let name: String?
+    let count: Int
+    let onPreviewContext: () -> Void
+    let onForget: () -> Void
+
+    @State private var isForgetHovered = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "folder")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(theme.secondaryText)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: name ?? String(localized: "Deleted project", bundle: .module))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(name == nil ? theme.secondaryText : theme.primaryText)
+                Text("Shared by every chat in this project", bundle: .module)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.tertiaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Text(pluralizedMemory(count, "memory", "memories"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(theme.secondaryText)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(theme.tertiaryBackground))
+
+            Button(action: onPreviewContext) {
+                Image(systemName: "eye")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(theme.tertiaryText)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(theme.tertiaryBackground)
+                    )
+            }
+            .buttonStyle(PlainButtonStyle())
+            .localizedHelp("Preview context for this project")
+
+            Button(action: onForget) {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(isForgetHovered ? .red : theme.tertiaryText)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(theme.tertiaryBackground)
+                    )
+            }
+            .buttonStyle(PlainButtonStyle())
+            .onHover { isForgetHovered = $0 }
+            .localizedHelp("Forget this project's shared memory")
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 4)
+    }
+}
+
+// MARK: - Context Preview Sheet
+
+/// Backs the eye-button preview on both agent and project rows. Upstream
+/// feeds this from `MemoryContextAssembler.assembleContext(agentId:config:)`
+/// for agents; that path isn't usable here — the Intel `assembleContext`
+/// (`IntelDataConformers.swift`) is documented to intentionally ignore
+/// `agentId` (it estimates the shared budget-rail number, matching real
+/// recall's own agent-blind scoping), so every row would render identical,
+/// mis-scoped content. Instead both rows share `memoryPreview(forNamespaceKey:)`
+/// below — a direct, agent/project-scoped `MemoryDatabase` read, the same
+/// technique upstream itself uses for the Projects section (its own
+/// `assembleContext` call is query-gated and returns nothing for an empty
+/// query, so upstream already bypasses it there for the same reason).
+struct ContextPreviewItem: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+struct ContextPreviewSheet: View {
+    let context: String
+
+    @ObservedObject private var themeManager = ThemeManager.shared
+    private var theme: ThemeProtocol { themeManager.currentTheme }
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Memory Context Preview", bundle: .module)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Pinned facts and episodes stored under this namespace", bundle: .module)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.tertiaryText)
+                }
+                Spacer()
+
+                Text(
+                    "~\(pluralizedMemory(max(1, context.count / MemoryConfiguration.charsPerToken), "token"))",
+                    bundle: .module
+                )
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(theme.secondaryText)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(theme.tertiaryBackground))
+
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6).fill(theme.tertiaryBackground)
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(20)
+
+            Divider().opacity(0.5)
+
+            ScrollView {
+                Text(context)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(theme.primaryText)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+        }
+        .background(theme.primaryBackground)
+        .environment(\.theme, themeManager.currentTheme)
+    }
+}
+
+/// Everything stored under one namespace (an agent's real UUID, or a
+/// `project-<uuid>` key), formatted like the "## Shared project memory"
+/// block upstream's own project preview builds. Reads pinned facts +
+/// episodes + raw transcript directly — no relevance gate, no vector
+/// search — so the preview always reflects what's on disk, and works
+/// identically for an agent namespace or a project namespace since both
+/// live under the same `agent_id` column (`MemoryNamespace`). Blocking DB
+/// reads — call off the main actor.
+func memoryPreview(forNamespaceKey key: String) -> String {
+    let facts = (try? MemoryDatabase.shared.loadPinnedFacts(agentId: key, limit: 50)) ?? []
+    let episodes = (try? MemoryDatabase.shared.loadEpisodes(agentId: key, days: 3650, limit: 50)) ?? []
+
+    var blocks: [String] = []
+    if !facts.isEmpty {
+        blocks.append(
+            "## Things I remember\n" + facts.map { "- \($0.content)" }.joined(separator: "\n"))
+    }
+    if !episodes.isEmpty {
+        let lines = episodes.map { ep in
+            "- [\(String(ep.conversationAt.prefix(10)))] \(ep.summary)"
+        }
+        blocks.append("## What we discussed before\n" + lines.joined(separator: "\n"))
+    }
+    // Raw turns mirrored on write (immediate memory) — present for project
+    // namespaces (mirrored eagerly) and, incidentally, for any agent whose
+    // transcript hasn't been pruned yet.
+    let transcripts = (try? MemoryDatabase.shared.loadTranscript(agentId: key, days: 3650, limit: 30)) ?? []
+    if !transcripts.isEmpty {
+        let lines = transcripts.prefix(30).map { turn -> String in
+            let text = turn.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let clipped = text.count > 200 ? String(text.prefix(200)) + "…" : text
+            return "- [\(turn.role)] \(clipped)"
+        }
+        blocks.append("## Recent notes\n" + lines.joined(separator: "\n"))
+    }
+    guard !blocks.isEmpty else {
+        return String(
+            localized: "(No memory context assembled — memory may be empty or disabled)",
+            bundle: .module
+        )
+    }
+    return "## Stored memory\n\n" + blocks.joined(separator: "\n\n")
+}
 #endif

@@ -275,7 +275,8 @@ public actor MemoryConsolidator {
         let durationMs = Int(Date().timeIntervalSince(started) * 1000)
         let details =
             "merged=\(mergedCount) promoted=\(promotedCount) evicted=\(evictedCount) "
-            + "prunedEpisodes=\(prunedEpisodes) prunedTranscript=\(prunedTurns)"
+            + "prunedEpisodes=\(prunedEpisodes) prunedTranscript=\(prunedTurns) "
+            + "[merge: \(lastMergeDiagnostics)]"
         do {
             try MemoryDatabase.shared.insertProcessingLog(
                 agentId: Self.logAgentId,
@@ -302,11 +303,21 @@ public actor MemoryConsolidator {
     /// new one. Makes no embedding calls: episodes without a stored vector
     /// (embeddings disabled, or distilled before an embedder was configured)
     /// don't participate and are left untouched.
+    /// Set by each run so the summary log can distinguish the three very
+    /// different reasons a merge count of zero happens: no episodes carry
+    /// embeddings at all, episodes exist but none were similar enough, or
+    /// there was simply nothing to compare. "merged=0" on its own is not
+    /// diagnosable, and that ambiguity cost a round of guesswork.
+    private var lastMergeDiagnostics: String = "considered=0 embedded=0"
+
     private func mergeNearDuplicateEpisodes() -> Int {
         let embedded =
             (try? MemoryDatabase.shared.loadEmbeddedEpisodes(
                 days: Self.unboundedHistoryDays, limit: 2000
             )) ?? []
+        let embeddedCount = embedded.filter { !$0.1.isEmpty }.count
+        var bestSimilarity = 0.0
+        lastMergeDiagnostics = "considered=\(embedded.count) embedded=\(embeddedCount)"
         guard embedded.count > 1 else { return 0 }
 
         let byAgent = Dictionary(grouping: embedded, by: { $0.episode.agentId })
@@ -323,6 +334,7 @@ public actor MemoryConsolidator {
                     if consumed.contains(epJ.id) { continue }
                     guard vecI.count == vecJ.count, !vecI.isEmpty else { continue }
                     let sim = Double(MemorySearchService.cosine(vecI, vecJ))
+                    if sim > bestSimilarity { bestSimilarity = sim }
                     guard sim >= MemoryConfiguration.episodeMergeCosineThreshold else { continue }
 
                     // Keep the older episode; delete the newer near-dup.
@@ -338,6 +350,11 @@ public actor MemoryConsolidator {
                 }
             }
         }
+
+        lastMergeDiagnostics =
+            "considered=\(embedded.count) embedded=\(embeddedCount) "
+            + String(format: "bestSim=%.2f threshold=%.2f", bestSimilarity,
+                MemoryConfiguration.episodeMergeCosineThreshold)
         return merged
     }
 

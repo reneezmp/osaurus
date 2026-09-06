@@ -142,6 +142,7 @@ public final class MemoryDiagnostics: ObservableObject {
                     agentId: key,
                     agentName: agent.name,
                     memoryEnabled: !manager.effectiveMemoryDisabled(for: agent.id),
+                    distillationEnabled: !manager.effectiveDistillationDisabled(for: agent.id),
                     episodeCount: episodesByAgent[key] ?? 0,
                     pinnedFactCount: pinnedByAgent[key] ?? 0,
                     pendingSignalCount: pendingByAgent[key] ?? 0
@@ -163,6 +164,7 @@ public final class MemoryDiagnostics: ObservableObject {
                     agentId: key,
                     agentName: key,
                     memoryEnabled: globalEnabled,
+                    distillationEnabled: nil,
                     episodeCount: episodesByAgent[key] ?? 0,
                     pinnedFactCount: pinnedByAgent[key] ?? 0,
                     pendingSignalCount: pendingByAgent[key] ?? 0
@@ -240,6 +242,12 @@ public struct MemoryAgentDiagnostic: Sendable, Identifiable {
     public let agentId: String
     public let agentName: String
     public let memoryEnabled: Bool
+    /// Whether THIS agent may distill. Distinct from `memoryEnabled`, which
+    /// today mirrors the single global switch: distillation is the per-agent,
+    /// default-off axis (it is the only part of memory that leaves the
+    /// machine), so it is what the panel's on/off state and Enable button act
+    /// on. `nil` for an orphaned namespace with no live agent to toggle.
+    public let distillationEnabled: Bool?
     public let episodeCount: Int
     public let pinnedFactCount: Int
     public let pendingSignalCount: Int

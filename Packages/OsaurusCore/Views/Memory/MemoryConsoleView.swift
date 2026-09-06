@@ -221,6 +221,21 @@ struct MemoryManagementConsoleView: View {
         }
     }
 
+    // No "Include disabled" toggle next to the agent filter, unlike
+    // upstream. Deliberately omitted, not forgotten: `MemoryDatabase`
+    // never writes any `status` besides `active` on this fork (no
+    // soft-disable path — `evictPinnedFacts` hard-deletes), and
+    // `IntelMemoryConsole.swift`'s query layer hardcodes `active` and has
+    // no `includeDisabled` field at all (see that file's own "Deliberate
+    // deviations" doc comment, item 1). A toggle here would filter nothing
+    // and always show the same rows — a dead control, which is worse than
+    // no control per this project's house rules. Unblocking it needs, in
+    // `MemoryDatabase` (owned by another lane): an `UPDATE ... SET status
+    // = 'disabled'` mutation for `pinned_facts` / `episodes`, and dropping
+    // the hardcoded `WHERE status = 'active'` from `loadPinnedFacts` /
+    // `searchPinnedFactsText` / `loadEpisodes` / `searchEpisodesText` in
+    // favor of a parameter — then `MemoryConsoleQuery` gains
+    // `includeDisabled` and this row gets its `Toggle`.
     private var filtersRow: some View {
         HStack(spacing: 12) {
             Picker("", selection: $scope) {

@@ -1929,6 +1929,16 @@ struct ContextBreakdown: Sendable {
             bd.context.append(Entry(id: "tools", label: "Tools", tokens: toolTokens, tint: .orange))
         }
 
+        // Recalled memory is spliced in as its own system message just before
+        // the last user turn (`injectMemoryPrefix`), so it costs real context
+        // and belongs on the rail. This mirror previously omitted it
+        // entirely — the excluded upstream builder derives it the same way,
+        // from `composed.memorySection`.
+        let memoryTokens = composed.memorySection.map { ContextBudgetManager.estimateTokens(for: $0) } ?? 0
+        if memoryTokens > 0 {
+            bd.context.append(Entry(id: "memory", label: "Memory", tokens: memoryTokens, tint: .teal))
+        }
+
         if conversationTokens > 0 {
             bd.messages.append(Entry(id: "conversation", label: "Conversation", tokens: conversationTokens, tint: .blue))
         }
@@ -1941,6 +1951,13 @@ struct ContextBreakdown: Sendable {
         return bd
     }
 
+    /// Welcome-screen / restored-session preview path.
+    ///
+    /// The Intel `PromptManifest` is an empty stub, so nothing can be read
+    /// from it — but every other argument is a real, already-computed count.
+    /// This used to return `ContextBreakdown()` and silently discard all of
+    /// them, which is why the preview popover showed no memory row no matter
+    /// what the estimator produced.
     static func from(
         manifest: PromptManifest,
         toolTokens: Int = 0,
@@ -1949,7 +1966,24 @@ struct ContextBreakdown: Sendable {
         inputTokens: Int = 0,
         outputTokens: Int = 0
     ) -> ContextBreakdown {
-        ContextBreakdown()
+        var bd = ContextBreakdown()
+        if toolTokens > 0 {
+            bd.context.append(Entry(id: "tools", label: "Tools", tokens: toolTokens, tint: .orange))
+        }
+        if memoryTokens > 0 {
+            bd.context.append(Entry(id: "memory", label: "Memory", tokens: memoryTokens, tint: .teal))
+        }
+        if conversationTokens > 0 {
+            bd.messages.append(
+                Entry(id: "conversation", label: "Conversation", tokens: conversationTokens, tint: .blue))
+        }
+        if inputTokens > 0 {
+            bd.messages.append(Entry(id: "input", label: "Input", tokens: inputTokens, tint: .cyan))
+        }
+        if outputTokens > 0 {
+            bd.messages.append(Entry(id: "output", label: "Output", tokens: outputTokens, tint: .green))
+        }
+        return bd
     }
 
     static func tint(for sectionId: String) -> Tint { .gray }

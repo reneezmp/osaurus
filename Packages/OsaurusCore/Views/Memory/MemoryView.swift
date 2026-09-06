@@ -1116,9 +1116,31 @@ enum MemoryTab: String, CaseIterable, AnimatedTabItem {
 struct MemoryView: View {
     @ObservedObject private var themeManager = ThemeManager.shared
     private var theme: ThemeProtocol { themeManager.currentTheme }
+    // Backs the tab-label counts/badge (Bug 1 — ported from upstream's
+    // `HeaderTabsRow(counts:badges:)` call). `MemoryDiagnostics.shared` is
+    // the single already-live source for episode/pinned counts and the
+    // pending-signal badge — see `Models/Chat/IntelConformers/IntelMemoryDiagnostics.swift`.
+    @ObservedObject private var diagnostics = MemoryDiagnostics.shared
+    @ObservedObject private var managementState = ManagementStateManager.shared
 
     @State private var selectedTab: MemoryTab = .identity
     @State private var hasAppeared = false
+    // Row count reported by `MemoryAgentsTabContent` (Default row + every
+    // agent/project row it actually renders) so the "Agents (n)" label
+    // counts what the tab shows, not a number this view would otherwise
+    // have to re-derive from a database read of its own.
+    @State private var agentsTabRowCount: Int = 0
+
+    private var tabCounts: [MemoryTab: Int] {
+        [
+            .memories: (diagnostics.snapshot?.pinnedFactCount ?? 0) + (diagnostics.snapshot?.episodeCount ?? 0),
+            .agents: agentsTabRowCount,
+        ]
+    }
+
+    private var tabBadges: [MemoryTab: Int] {
+        [.diagnostics: diagnostics.snapshot?.pendingSignals ?? 0]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1134,7 +1156,7 @@ struct MemoryView: View {
                 case .memories:
                     MemoryConsoleTabContent()
                 case .agents:
-                    MemoryAgentsTabContent()
+                    MemoryAgentsTabContent(onRowCountChanged: { agentsTabRowCount = $0 })
                 case .settings:
                     MemorySettingsTabContent()
                 case .diagnostics:
@@ -1149,7 +1171,28 @@ struct MemoryView: View {
             withAnimation(.easeOut(duration: 0.25).delay(0.05)) {
                 hasAppeared = true
             }
+            consumePendingSubTabRequest()
+            Task { await diagnostics.refresh() }
         }
+        // Single-parameter `onChange` — macOS 13 target (the two-parameter
+        // `{ old, new in }` form upstream uses is macOS 14+ and would not
+        // compile here). Lets "Browse in Memories" jump tabs even when this
+        // view is already on screen (`onAppear` alone only fires once).
+        .onChange(of: managementState.memorySubTabRequest) { _ in
+            consumePendingSubTabRequest()
+        }
+    }
+
+    /// Honors a cross-view sub-tab request — currently just the Agents
+    /// tab's "Browse in Memories" button — the same
+    /// `ManagementStateManager.memorySubTabRequest` mechanism upstream
+    /// uses for its own settings-search deep links.
+    private func consumePendingSubTabRequest() {
+        guard let requested = managementState.memorySubTabRequest,
+            let tab = MemoryTab(rawValue: requested)
+        else { return }
+        selectedTab = tab
+        managementState.memorySubTabRequest = nil
     }
 
     private var headerView: some View {
@@ -1160,7 +1203,7 @@ struct MemoryView: View {
         ) {
             EmptyView()
         } tabsRow: {
-            HeaderTabsRow(selection: $selectedTab)
+            HeaderTabsRow(selection: $selectedTab, counts: tabCounts, badges: tabBadges)
         }
     }
 }

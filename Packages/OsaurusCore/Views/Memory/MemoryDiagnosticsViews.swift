@@ -701,19 +701,44 @@ extension MemoryView {
 //  the data lines up 1:1 (pipeline status rows, per-agent breakdown,
 //  recent processing log, headline banner).
 //
+//  Card grouping now mirrors upstream's three cards exactly: `Pipeline`
+//  (headline + Status subsection + Activity subsection, in one card, not
+//  two), `Per-Agent Memory`, `Recent Activity` — a prior pass here had
+//  Activity as its own separate card and a five-block stat grid instead of
+//  upstream's one-line-per-metric rows; both are fixed below.
+//
 //  Deliberately NOT ported, and why:
-//   * Backfill / buffer-probe controls. Upstream's `runBackfill()` and
-//     `runBufferProbe()` call into `MemoryService.backfillFromChatHistory`
-//     and a probe helper that have no Intel equivalent — out of scope for
-//     this pass (diagnostics visibility only, see docs/MEMORY_PLAN.md §3).
-//   * The per-row "Enable" button that flips `agent.disableMemory`
-//     directly. Per-agent opt-in is Phase 3, owned by another lane; this
-//     tab reads `MemoryAgentDiagnostic.memoryEnabled` but writes nothing.
+//   * Backfill / buffer-probe controls (upstream's Pipeline-card header
+//     actions). `runBackfill()` calls `MemoryService.backfillFromChatHistory`
+//     and `runBufferProbe()` calls a probe helper — neither has an Intel
+//     equivalent, so the header below carries only Refresh.
+//   * "Live chat" / "Distill queue" activity rows. Upstream sources these
+//     from `InferenceLoadCoordinator.shared.chatActive` and
+//     `DistillationCoordinator.shared.snapshot()` — the latter type is in
+//     `Package.swift`'s `exclude:` list on this fork, and there is no
+//     Intel mirror of either signal (no "is a chat generating right now"
+//     nor "distill single-flight depth" telemetry exists here). Omitted
+//     rather than faked.
 //   * The rich `bufferTelemetryRow` bucket breakdown (empty-msg / disabled
 //     / insert-failure counts). The §5 snapshot contract exposes exactly
 //     one number for this, `bufferAttempts` — no per-bucket detail exists
 //     to show, so the row below states the count and the zero-attempts
 //     remediation text only.
+//
+//  The per-agent "Enable" button now IS wired (a prior pass here left it
+//  unported, noting Phase 3 wasn't implemented yet — it has since landed):
+//  `AgentManager.updateDistillationEnabled(_:for:)`
+//  (`IntelManagerConformers.swift`) is live, and its own doc comment names
+//  this exact card as the intended call site. The semantics differ from
+//  upstream's `agent.memoryEnabled` (a per-agent recall on/off that
+//  doesn't exist on this fork) — the honest Intel equivalent is
+//  `MemoryConfiguration.isDistillationEnabled(for:)`, the Phase 3 opt-in
+//  distillation gate (`docs/MEMORY_PLAN.md` §2b: opt-in, default OFF, a
+//  deliberate divergence from upstream not to be corrected away). Row
+//  state below is therefore "off (global)" / "off (this agent)" / "on"
+//  against that gate, not against recall. Unlike upstream, Enable is
+//  offered for the Default agent too — the opt-in store keys by UUID with
+//  no built-in/custom distinction (see that method's doc comment).
 //
 //  Data source is a single `@Published snapshot: MemoryDiagnosticsSnapshot?`
 //  refreshed on demand, rather than the dozen separate `@State` vars
@@ -721,16 +746,22 @@ extension MemoryView {
 //  collapse is the point of the Phase 1 service boundary, not a taste
 //  deviation from upstream's structure.
 //
-//  macOS 13: nothing in this tab uses `onChange` (no config edits happen
-//  here), so there is no two- vs one-parameter concern to resolve.
+//  macOS 13: the per-agent Enable button changes local `@State`, not a
+//  binding read by `onChange`, so there is still no two- vs
+//  one-parameter `onChange` concern to resolve in this file.
 //
-//  SF Symbols: `stethoscope` (upstream's diagnostics-card icon) only ever
-//  appears inside `#if !OSAURUS_INTEL` blocks elsewhere in this fork's
-//  `Views/` tree (`ProviderDiagnosticsRowsView.swift`,
-//  `SandboxView.swift`) — i.e. it has never actually rendered on Intel,
-//  which is exactly the trap docs/MEMORY_PLAN.md §4 warns about. Replaced
-//  with `waveform`, confirmed live and unconditional in `ServerView.swift`,
-//  `AudioSettingsTab.swift`, and `ProvisioningJourneyView.swift`.
+//  SF Symbols, each verified live+ungated in this fork's `Views/` tree
+//  (grep + `#if` boundary check, not just "it compiles somewhere"):
+//   * `waveform.path.ecg` — upstream's own Pipeline-card icon. Confirmed
+//     unconditional in `Views/Settings/ServerSettings/ServerSettingsSection.swift`
+//     and `Views/Agent/AgentsView.swift` (neither file has an `#if` split).
+//     Replaces this file's prior substitute (`waveform`) now that the
+//     upstream icon itself checks out — no need to keep substituting.
+//   * `person.fill` — kept from the prior pass (`Views/Identity/IdentityView.swift`,
+//     unconditional) rather than upstream's own `person.2`, which
+//     `docs/MEMORY_PLAN.md` §4 lists by name as unverified on this fork.
+//   * `list.bullet.rectangle` — upstream's Recent-Activity icon. Confirmed
+//     unconditional in `Views/Agent/AgentCapabilityManagerView.swift`.
 //
 
 import SwiftUI
@@ -746,6 +777,12 @@ struct MemoryDiagnosticsTabContent: View {
     @ObservedObject private var diagnostics = MemoryDiagnostics.shared
 
     @State private var isRefreshing = false
+    /// Backs the per-agent Enable button's instant re-render: mutating
+    /// `MemoryConfigurationStore` (plain JSON-on-disk storage, not an
+    /// `ObservableObject`) doesn't itself trigger a SwiftUI update, so the
+    /// row's "off (this agent)" / "on" text re-reads from this cached copy
+    /// rather than re-fetching on every body evaluation.
+    @State private var memoryConfig = MemoryConfigurationStore.load()
 
     private static let iso8601Formatter = ISO8601DateFormatter()
     private static let relativeFormatter: RelativeDateTimeFormatter = {
@@ -764,9 +801,8 @@ struct MemoryDiagnosticsTabContent: View {
             VStack(alignment: .leading, spacing: 20) {
                 if let snapshot = diagnostics.snapshot {
                     pipelineCard(snapshot)
-                    activityCard(snapshot)
-                    recentLogCard(snapshot)
                     perAgentCard(snapshot)
+                    recentLogCard(snapshot)
                 } else {
                     loadingCard
                 }
@@ -800,7 +836,7 @@ struct MemoryDiagnosticsTabContent: View {
     /// called / buffered-but-never-distilled / distilling-but-skipping /
     /// calling an unhealthy model.
     private func pipelineCard(_ s: MemoryDiagnosticsSnapshot) -> some View {
-        MemorySectionCard(title: "Diagnostics", icon: "waveform") {
+        MemorySectionCard(title: "Pipeline", icon: "waveform.path.ecg") {
             MemorySectionActionButton(isRefreshing ? "Refreshing..." : "Refresh", icon: "arrow.clockwise") {
                 refresh()
             }
@@ -809,35 +845,58 @@ struct MemoryDiagnosticsTabContent: View {
             VStack(alignment: .leading, spacing: 14) {
                 headlineBanner(s)
                 bufferAttemptsRow(s)
-                Divider().opacity(0.5)
-                diagnosticRow(
-                    label: "Memory enabled",
-                    value: s.memoryEnabled ? L("yes") : L("no"),
-                    statusColor: s.memoryEnabled ? .green : .red
-                )
-                diagnosticRow(
-                    label: "Memory DB open",
-                    value: s.databaseOpen ? L("yes") : L("no"),
-                    statusColor: s.databaseOpen ? .green : .red,
-                    detail: s.databaseOpen
-                        ? nil
-                        : L(
-                            "Memory database failed to open. Check Console for SQLCipher errors and the storage migration logs."
-                        )
-                )
-                diagnosticRow(
-                    label: "Extraction mode",
-                    value: extractionModeDescription(s.extractionMode),
-                    statusColor: s.extractionMode == "sessionEnd" ? .green : .orange,
-                    detail: extractionModeDetail(s.extractionMode)
-                )
-                diagnosticRow(
-                    label: "Core model",
-                    value: s.coreModel ?? L("unavailable"),
-                    statusColor: s.coreModel == nil ? .red : .green,
-                    detail: s.coreModelDetail
-                )
+
+                Divider().opacity(0.4)
+
+                diagnosticSubsection("Status") {
+                    diagnosticRow(
+                        label: "Memory enabled",
+                        value: s.memoryEnabled ? L("yes") : L("no"),
+                        statusColor: s.memoryEnabled ? .green : .red
+                    )
+                    diagnosticRow(
+                        label: "Memory DB open",
+                        value: s.databaseOpen ? L("yes") : L("no"),
+                        statusColor: s.databaseOpen ? .green : .red,
+                        detail: s.databaseOpen
+                            ? nil
+                            : L(
+                                "Memory database failed to open. Check Console for SQLCipher errors and the storage migration logs."
+                            )
+                    )
+                    diagnosticRow(
+                        label: "Extraction mode",
+                        value: extractionModeDescription(s.extractionMode),
+                        statusColor: s.extractionMode == "sessionEnd" ? .green : .orange,
+                        detail: extractionModeDetail(s.extractionMode)
+                    )
+                    diagnosticRow(
+                        label: "Core model",
+                        value: s.coreModel ?? L("unavailable"),
+                        statusColor: s.coreModel == nil ? .red : .green,
+                        detail: s.coreModelDetail
+                    )
+                }
+
+                Divider().opacity(0.4)
+
+                diagnosticSubsection("Activity") {
+                    activityRows(s)
+                }
             }
+        }
+    }
+
+    private func diagnosticSubsection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(LocalizedStringKey(title), bundle: .module)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(theme.tertiaryText)
+                .tracking(0.4)
+            content()
         }
     }
 
@@ -922,68 +981,54 @@ struct MemoryDiagnosticsTabContent: View {
         return L("Manual mode never auto-distills. Distillation only runs from an explicit trigger.")
     }
 
-    // MARK: - Activity card
+    // MARK: - Activity subsection (inside the Pipeline card)
 
-    /// Mirrors upstream's pending/processed/dead + distillation-result +
-    /// episode/pinned/database rows. The distillation-result counts are
-    /// laid out as stat blocks (same idiom as the Statistics tab's
-    /// `statBlock`) since there are five of them (ok/skipped/errors/
-    /// empty/dead) and a row-per-count would dwarf everything else here.
-    private func activityCard(_ s: MemoryDiagnosticsSnapshot) -> some View {
-        MemorySectionCard(title: "Activity", icon: "number") {
-            VStack(alignment: .leading, spacing: 14) {
-                diagnosticRow(
-                    label: "Pending signals",
-                    value: L("\(s.pendingSignals) pending · \(s.allTimeSignals) all-time"),
-                    statusColor: pendingSignalsColor(s),
-                    detail: pendingSignalsDetail(s)
-                )
-                diagnosticRow(
-                    label: "Dead-lettered signals",
-                    value: "\(s.deadSignals)",
-                    statusColor: s.deadSignals == 0 ? .green : .red
-                )
-
-                Divider().opacity(0.5)
-
-                Text("DISTILLATION RESULTS", bundle: .module)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(theme.tertiaryText)
-                    .tracking(0.4)
-                HStack(spacing: 0) {
-                    statBlock(label: "OK", value: "\(s.distillOK)")
-                    Divider().frame(height: 32).opacity(0.5)
-                    statBlock(label: "Skipped", value: "\(s.distillSkipped)")
-                    Divider().frame(height: 32).opacity(0.5)
-                    statBlock(label: "Errors", value: "\(s.distillErrors)")
-                    Divider().frame(height: 32).opacity(0.5)
-                    statBlock(label: "Empty", value: "\(s.distillEmpty)")
-                    Divider().frame(height: 32).opacity(0.5)
-                    statBlock(label: "Dead", value: "\(s.distillDead)")
-                }
-
-                Divider().opacity(0.5)
-
-                diagnosticRow(
-                    label: "Episodes",
-                    value: "\(s.episodeCount)",
-                    statusColor: s.episodeCount == 0 ? .red : .green
-                )
-                diagnosticRow(
-                    label: "Pinned facts",
-                    value: "\(s.pinnedFactCount)",
-                    statusColor: s.pinnedFactCount == 0 ? .gray : .green
-                )
-                diagnosticRow(
-                    label: "Database size",
-                    value: formatBytes(s.databaseBytes),
-                    statusColor: .gray
-                )
-            }
-        }
+    /// One line per metric, matching upstream's `activityRows` text and
+    /// ordering exactly (`"N pending · N processed · N dead · N all-time"`,
+    /// `"N ok · N skipped · N err · N empty · N dead"`) — a prior pass here
+    /// laid the five distillation-result counts out as a stat-block grid
+    /// instead; every number below comes straight off
+    /// `MemoryDiagnosticsSnapshot`, no grid needed.
+    @ViewBuilder
+    private func activityRows(_ s: MemoryDiagnosticsSnapshot) -> some View {
+        diagnosticRow(
+            label: "Pending signals",
+            value: L(
+                "\(s.pendingSignals) pending · \(s.processedSignals) processed · \(s.deadSignals) dead · \(s.allTimeSignals) all-time"
+            ),
+            statusColor: pendingSignalsColor(s),
+            detail: pendingSignalsDetail(s)
+        )
+        diagnosticRow(
+            label: "Distillation results",
+            value: L(
+                "\(s.distillOK) ok · \(s.distillSkipped) skipped · \(s.distillErrors) err · \(s.distillEmpty) empty · \(s.distillDead) dead"
+            ),
+            statusColor: s.distillErrors > 0 || s.distillDead > 0
+                ? .red : (s.distillOK > 0 ? .green : .gray)
+        )
+        diagnosticRow(
+            label: "Episodes",
+            value: "\(s.episodeCount)",
+            statusColor: s.episodeCount == 0 ? .red : .green
+        )
+        diagnosticRow(
+            label: "Pinned facts",
+            value: "\(s.pinnedFactCount)",
+            statusColor: s.pinnedFactCount == 0 ? .gray : .green
+        )
+        // "Live chat" / "Distill queue" omitted — see this file's header
+        // comment (no `InferenceLoadCoordinator` / `DistillationCoordinator`
+        // equivalent exists on Intel to back them honestly).
+        diagnosticRow(
+            label: "Database size",
+            value: formatBytes(s.databaseBytes),
+            statusColor: .gray
+        )
     }
 
     private func pendingSignalsColor(_ s: MemoryDiagnosticsSnapshot) -> Color {
+        if s.deadSignals > 0 { return .red }
         if s.allTimeSignals == 0 { return .red }
         if s.pendingSignals == 0 { return .green }
         return .orange
@@ -1001,18 +1046,6 @@ struct MemoryDiagnosticsTabContent: View {
         return nil
     }
 
-    private func statBlock(label: String, value: String) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundColor(theme.primaryText)
-            Text(LocalizedStringKey(label), bundle: .module)
-                .font(.system(size: 11))
-                .foregroundColor(theme.tertiaryText)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
     private func formatBytes(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
@@ -1023,7 +1056,7 @@ struct MemoryDiagnosticsTabContent: View {
 
     private func recentLogCard(_ s: MemoryDiagnosticsSnapshot) -> some View {
         MemorySectionCard(
-            title: "Recent Processing Log", icon: "clock.arrow.circlepath",
+            title: "Recent Activity", icon: "list.bullet.rectangle",
             count: s.recentLog.isEmpty ? nil : s.recentLog.count
         ) {
             if s.recentLog.isEmpty {
@@ -1137,21 +1170,62 @@ struct MemoryDiagnosticsTabContent: View {
         }
     }
 
+    /// Mirrors upstream's per-agent row: a status dot, the agent's name, and
+    /// a trailing `on` / `off (this agent)` state with an Enable button.
+    ///
+    /// The state shown is DISTILLATION, not memory. Memory is a single global
+    /// switch here, so a per-agent memory column would show the same value on
+    /// every row and tell you nothing; distillation is the real per-agent,
+    /// default-off axis, and it is what the button toggles. An orphaned
+    /// namespace (memory rows whose agent no longer exists) reports `nil` and
+    /// gets no button, since there is nothing live to turn on.
     private func perAgentRow(_ agent: MemoryAgentDiagnostic) -> some View {
-        HStack(spacing: 10) {
+        let isOn = agent.distillationEnabled ?? false
+        return HStack(spacing: 10) {
             Circle()
-                .fill(agent.memoryEnabled ? Color.green : Color.gray)
+                .fill(isOn ? Color.green : Color.orange.opacity(0.8))
                 .frame(width: 7, height: 7)
-            Text(agent.agentName)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(theme.primaryText)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(agent.agentName)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(theme.primaryText)
+                    .lineLimit(1)
+                Text(
+                    verbatim:
+                        "\(agent.episodeCount) ep · \(agent.pinnedFactCount) pinned · \(agent.pendingSignalCount) pending"
+                )
+                .font(.system(size: 10))
+                .foregroundColor(theme.tertiaryText)
+            }
             Spacer()
-            Text(
-                "\(agent.episodeCount) ep · \(agent.pinnedFactCount) pinned · \(agent.pendingSignalCount) pending"
-            )
-            .font(.system(size: 11))
-            .foregroundColor(theme.tertiaryText)
+            if agent.distillationEnabled == nil {
+                Text("no live agent", bundle: .module)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.tertiaryText)
+            } else if isOn {
+                Text("on", bundle: .module)
+                    .font(.system(size: 11))
+                    .foregroundColor(.green)
+            } else {
+                Text("off (this agent)", bundle: .module)
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+                Button {
+                    guard let id = UUID(uuidString: agent.agentId) else { return }
+                    AgentManager.shared.updateDistillationEnabled(true, for: id)
+                    Task { await MemoryDiagnostics.shared.refresh() }
+                } label: {
+                    Text("Enable", bundle: .module)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(theme.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(theme.accentColor.opacity(theme.isDark ? 0.18 : 0.12)))
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+            }
         }
         .padding(.vertical, 4)
     }

@@ -5,14 +5,30 @@
 //  The Memory tab's Agents view: what each agent and each project has
 //  actually accumulated, and a way to forget a namespace wholesale.
 //
-//  Mirrors upstream's Agents tab (AGENTS list + PROJECTS section). Upstream
-//  additionally drills into a per-agent detail pane; on this fork those
-//  panels are still placeholders, so the rows are counts plus a forget
-//  control rather than navigation into an empty screen.
+//  Mirrors upstream's Agents tab: a Default-agent summary row (subtitle +
+//  memory pill + eye preview + "Browse in Memories", no drill-in — upstream
+//  never lets you open the Default agent's detail pane from here either),
+//  then one `MemoryAgentRow` per custom agent that actually has memory
+//  (dot + description + pill + eye + chevron), then a Projects section of
+//  `MemoryProjectRow`s (folder + subtitle + pill + eye + trash). Both row
+//  types and the shared preview helper live in `MemoryComponents.swift`.
 //
 //  Memory has no project column: a project's rows live under the same
 //  `agent_id` column keyed `project-<uuid>` (see `MemoryNamespace`). That is
-//  why one delete path serves both lists.
+//  why one delete path serves both lists, and why the same
+//  `memoryPreview(forNamespaceKey:)` helper previews both an agent and a
+//  project row.
+//
+//  Drill-in: `AgentDetailView` (`Views/Agent/AgentsView.swift`) is a real,
+//  live destination on this fork (not excluded, not gated behind anything
+//  amputated — it already compiles and is reachable from the actual Agents
+//  management tab). Upstream replaces its whole Memory tab body with it
+//  inline; here it's presented as a sheet instead, so this file doesn't
+//  have to lift `selectedAgent` state into `MemoryView.swift` (which I also
+//  own, but a full inline swap would mean restructuring its body and
+//  threading onDelete/onSwitchAgent reload semantics through a second
+//  file). The destination is real either way — this is a presentation
+//  simplification, not a stub.
 //
 
 #if OSAURUS_INTEL
@@ -26,19 +42,28 @@
         @ObservedObject private var projectManager = ProjectManager.shared
         @Environment(\.themedAlertScope) private var alertScope
 
-        @State private var agentRows: [NamespaceRow] = []
-        @State private var projectRows: [NamespaceRow] = []
-        @State private var loadError: String?
+        /// Reported upward so the Memory tab's header badge
+        /// ("Agents (n)") can count every row this tab actually shows —
+        /// see `MemoryView.swift`'s `HeaderTabsRow` call.
+        var onRowCountChanged: ((Int) -> Void)? = nil
 
-        /// One namespace and how much it holds. `key` is what the database
-        /// stores; `name` is resolved for display and falls back to the raw
-        /// key so a namespace whose agent or project was deleted is still
-        /// visible and still forgettable rather than becoming invisible junk.
-        struct NamespaceRow: Identifiable {
-            let key: String
-            let name: String
+        @State private var defaultAgentCount: Int = 0
+        @State private var agentRows: [(agent: Agent, count: Int)] = []
+        @State private var projectRows: [ProjectRow] = []
+        @State private var loadError: String?
+        @State private var contextPreviewItem: ContextPreviewItem?
+        @State private var detailAgent: Agent?
+
+        /// One shared-project namespace and how much it holds. `name` is
+        /// nil for an orphan (project deleted but its purge never
+        /// completed) so the row can offer cleanup instead of hiding rows
+        /// the user can't otherwise account for — same shape as upstream's
+        /// `projectMemoryCounts`.
+        struct ProjectRow: Identifiable {
+            let namespaceKey: String
+            let name: String?
             let count: Int
-            var id: String { key }
+            var id: String { namespaceKey }
         }
 
         var body: some View {
@@ -49,18 +74,10 @@
                             .font(.system(size: 12))
                             .foregroundColor(theme.errorColor)
                     }
-                    section(
-                        title: "Agents",
-                        subtitle: "What each agent has remembered on its own.",
-                        rows: agentRows,
-                        emptyText: "No agent has stored anything yet."
-                    )
-                    section(
-                        title: "Projects",
-                        subtitle: "Shared by every chat in the project.",
-                        rows: projectRows,
-                        emptyText: "No project has stored anything yet."
-                    )
+                    agentsSection
+                    if !projectRows.isEmpty {
+                        projectsSection
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.vertical, 24)
@@ -69,75 +86,167 @@
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(theme.primaryBackground)
             .onAppear { reload() }
+            .sheet(item: $contextPreviewItem) { item in
+                ContextPreviewSheet(context: item.text)
+                    .frame(minWidth: 560, minHeight: 420)
+            }
+            .sheet(item: $detailAgent) { agent in
+                AgentDetailView(
+                    agent: agent,
+                    onBack: { detailAgent = nil },
+                    onDelete: { _ in
+                        detailAgent = nil
+                        reload()
+                    },
+                    onSwitchAgent: { newAgent in
+                        detailAgent = newAgent
+                    },
+                    showSuccess: { message in
+                        ToastManager.shared.success(message)
+                    }
+                )
+                .frame(minWidth: 720, minHeight: 600)
+            }
         }
 
-        // MARK: - Sections
+        // MARK: - Agents Section
 
-        private func section(
-            title: String.LocalizationValue,
-            subtitle: String.LocalizationValue,
-            rows: [NamespaceRow],
-            emptyText: String.LocalizationValue
-        ) -> some View {
+        private var agentsSection: some View {
             card {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(verbatim: String(localized: title, bundle: .module))
+                    Text("Agents", bundle: .module)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(theme.primaryText)
-                    Text(verbatim: String(localized: subtitle, bundle: .module))
+                    Text("What each agent has remembered on its own.", bundle: .module)
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText)
 
-                    if rows.isEmpty {
-                        Text(verbatim: String(localized: emptyText, bundle: .module))
-                            .font(.system(size: 12))
-                            .foregroundColor(theme.secondaryText.opacity(0.8))
-                            .padding(.vertical, 8)
-                    } else {
-                        ForEach(rows) { row in
+                    Divider().opacity(0.35)
+                    defaultAgentSummaryRow
+
+                    if !agentRows.isEmpty {
+                        ForEach(Array(agentRows.enumerated()), id: \.element.agent.id) { index, pair in
                             Divider().opacity(0.35)
-                            namespaceRow(row)
+                            MemoryAgentRow(
+                                agent: pair.agent,
+                                count: pair.count,
+                                onSelect: { detailAgent = pair.agent },
+                                onPreviewContext: { presentPreview(forKey: pair.agent.id.uuidString) }
+                            )
                         }
                     }
                 }
             }
         }
 
-        private func namespaceRow(_ row: NamespaceRow) -> some View {
-            HStack(spacing: 10) {
-                Image(systemName: "folder")
-                    .font(.system(size: 12))
-                    .foregroundColor(theme.secondaryText)
-                Text(verbatim: row.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(theme.primaryText)
-                    .lineLimit(1)
-                Spacer()
-                Text(verbatim: "\(row.count)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(theme.primaryBackground.opacity(0.6)))
-                Button {
-                    confirmForget(row)
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(theme.secondaryText)
+        /// Compact, always-shown Default-agent row. No chevron/onSelect —
+        /// upstream never lets you drill into the Default agent's detail
+        /// pane from the Memory tab either (`AgentDetailView`'s own editing
+        /// surface is reached through Settings, not here).
+        private var defaultAgentSummaryRow: some View {
+            let defaultAgent = agentManager.agents.first(where: { $0.id == Agent.defaultId }) ?? Agent.default
+            return HStack(spacing: 10) {
+                Circle()
+                    .fill(theme.accentColor)
+                    .frame(width: 8, height: 8)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(defaultAgent.displayName)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text("Uses your global memory settings", bundle: .module)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.tertiaryText)
+                        .lineLimit(1)
                 }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
-                .localizedHelp("Forget this memory")
+
+                Spacer()
+
+                if defaultAgentCount > 0 {
+                    Text(pluralizedMemory(defaultAgentCount, "memory", "memories"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(theme.tertiaryBackground))
+                }
+
+                Button {
+                    presentPreview(forKey: Agent.defaultId.uuidString)
+                } label: {
+                    Image(systemName: "eye")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(theme.tertiaryText)
+                        .frame(width: 26, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(theme.tertiaryBackground))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .localizedHelp("Preview memory context")
+
+                Button {
+                    ManagementStateManager.shared.memorySubTabRequest = MemoryTab.memories.rawValue
+                } label: {
+                    HStack(spacing: 5) {
+                        // Upstream uses `rectangle.and.text.magnifyingglass`
+                        // here — flagged in docs/MEMORY_PLAN.md §4 as the
+                        // highest blank-render risk on macOS 13 (right at
+                        // the cutoff). Substituted with `magnifyingglass`,
+                        // confirmed live/ungated elsewhere in this fork's
+                        // Views/ tree (e.g. `Views/Skill/SkillsView.swift`).
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 10, weight: .medium))
+                        Text("Browse in Memories", bundle: .module)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(theme.secondaryText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(theme.tertiaryBackground))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .localizedHelp("Browse the default agent's memories")
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 4)
+        }
+
+        // MARK: - Projects Section
+
+        private var projectsSection: some View {
+            card {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Projects", bundle: .module)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Shared by every chat in the project.", bundle: .module)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+
+                    ForEach(projectRows) { row in
+                        Divider().opacity(0.35)
+                        MemoryProjectRow(
+                            name: row.name,
+                            count: row.count,
+                            onPreviewContext: { presentPreview(forKey: row.namespaceKey) },
+                            onForget: { confirmForget(key: row.namespaceKey, label: row.name ?? row.namespaceKey, count: row.count) }
+                        )
+                    }
+                }
+            }
         }
 
         // MARK: - Actions
 
+        private func presentPreview(forKey key: String) {
+            Task.detached {
+                let text = memoryPreview(forNamespaceKey: key)
+                await MainActor.run { contextPreviewItem = ContextPreviewItem(text: text) }
+            }
+        }
+
         /// Forgetting a namespace deletes rows permanently, so it confirms
         /// first and names what is going, matching the Danger Zone's shape.
-        private func confirmForget(_ row: NamespaceRow) {
+        private func confirmForget(key: String, label: String, count: Int) {
             let requestId = UUID()
             let scope = alertScope
             ThemedAlertCenter.shared.present(
@@ -145,12 +254,12 @@
                     id: requestId,
                     title: L("Forget These Memories?"),
                     message: L(
-                        "\(row.count) stored memories for \"\(row.name)\" will be deleted. Chats themselves are not affected."
+                        "\(count) stored memories for \"\(label)\" will be deleted. Chats themselves are not affected."
                     ),
                     buttons: [
                         .cancel(L("Cancel")),
                         .destructive(L("Forget")) {
-                            forget(row)
+                            forget(key: key)
                         },
                     ],
                     onDismiss: { ThemedAlertCenter.shared.dismiss(scope: scope, id: requestId) }
@@ -159,9 +268,9 @@
             )
         }
 
-        private func forget(_ row: NamespaceRow) {
+        private func forget(key: String) {
             do {
-                try MemoryDatabase.shared.deleteNamespaceData(agentId: row.key)
+                try MemoryDatabase.shared.deleteNamespaceData(agentId: key)
                 // Embeddings are BLOB columns on the same rows, so deleting
                 // the rows is the whole purge — there is no separate vector
                 // store to clean up on this build.
@@ -178,24 +287,34 @@
         private func reload() {
             let db = MemoryDatabase.shared
             do {
-                let agents = try db.agentNamespaceCounts()
-                let projects = try db.projectNamespaceCounts()
-                agentRows = agents.map { entry in
-                    NamespaceRow(
-                        key: entry.agentId,
-                        name: displayName(forAgentKey: entry.agentId),
-                        count: entry.count
-                    )
+                let agentEntries = try db.agentNamespaceCounts()
+                let countsByAgentId = Dictionary(uniqueKeysWithValues: agentEntries)
+
+                defaultAgentCount = countsByAgentId[Agent.defaultId.uuidString] ?? 0
+
+                let lookup = Dictionary(
+                    agentManager.agents.map { ($0.id, $0) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                agentRows = agentEntries.compactMap { entry -> (agent: Agent, count: Int)? in
+                    guard let uuid = UUID(uuidString: entry.agentId),
+                        uuid != Agent.defaultId,
+                        let agent = lookup[uuid]
+                    else { return nil }
+                    return (agent: agent, count: entry.count)
                 }
                 .sorted { $0.count > $1.count }
-                projectRows = projects.map { entry in
-                    NamespaceRow(
-                        key: entry.namespaceKey,
+
+                let projectEntries = try db.projectNamespaceCounts()
+                projectRows = projectEntries.map { entry in
+                    ProjectRow(
+                        namespaceKey: entry.namespaceKey,
                         name: displayName(forProjectKey: entry.namespaceKey),
                         count: entry.count
                     )
                 }
                 .sorted { $0.count > $1.count }
+
                 loadError = nil
             } catch {
                 loadError = String(
@@ -203,19 +322,13 @@
                     bundle: .module
                 )
             }
+            onRowCountChanged?(agentRows.count + projectRows.count)
         }
 
-        private func displayName(forAgentKey key: String) -> String {
-            guard let id = UUID(uuidString: key),
-                let agent = agentManager.agents.first(where: { $0.id == id })
-            else { return key }
-            return agent.displayName
-        }
-
-        private func displayName(forProjectKey key: String) -> String {
+        private func displayName(forProjectKey key: String) -> String? {
             guard case .project(let id)? = MemoryNamespace(key: key),
                 let project = projectManager.project(for: id)
-            else { return key }
+            else { return nil }
             return project.name
         }
 
