@@ -76,6 +76,24 @@ public actor MemoryService {
             return
         }
 
+        // Phase 3 gate (2026-09-05 owner decision — docs/MEMORY_PLAN.md §2):
+        // distillation is opt-in per agent, default OFF. This is the entry
+        // point of the whole pipeline — refusing here means a disabled
+        // agent's turns never even reach `pending_signals`, so there is
+        // nothing left for `flushSession`/`syncNow`/`recoverOrphanedSignals`
+        // to distill later. Uses `AgentManager.shared.effectiveDistillationDisabled`
+        // (Models/Chat/IntelConformers/IntelManagerConformers.swift) as the
+        // single source of truth rather than re-deriving the check here.
+        // This is deliberately independent of the `config.enabled` guard
+        // just above: `enabled` gates the local, on-device recall/write path
+        // (unchanged by this task); this gate governs only whether the
+        // buffered content may later be sent to a cloud provider.
+        let agentUUID = UUID(uuidString: agentId) ?? Agent.defaultId
+        guard !AgentManager.shared.effectiveDistillationDisabled(for: agentUUID) else {
+            telemetry.earlyReturnsDisabled += 1
+            return
+        }
+
         do {
             try db.insertPendingSignal(
                 PendingSignal(
@@ -187,6 +205,29 @@ public actor MemoryService {
     ) async {
         let config = MemoryConfigurationStore.load()
         guard config.enabled else { return }
+
+        // Defense-in-depth for the same Phase 3 gate `bufferTurn` enforces
+        // at the front door. `bufferTurn` refusing to queue a disabled
+        // agent's turns closes the debounce/`distillSession` path, but this
+        // is the one place every distillation attempt funnels through —
+        // `distillSession`, `syncNow`, and therefore `flushSession` and
+        // `recoverOrphanedSignals` (which call `syncNow`) all end up here.
+        // Without this second check, a conversation buffered while
+        // distillation was enabled, then left pending across an opt-out,
+        // could still be distilled later by a `syncNow`/flush call that
+        // never passes through `bufferTurn` at all. Signals stay pending
+        // (not marked processed) so opting back in picks them up, same as
+        // the "no model available" skip below.
+        let agentUUID = UUID(uuidString: agentId) ?? Agent.defaultId
+        guard !AgentManager.shared.effectiveDistillationDisabled(for: agentUUID) else {
+            MemoryLogger.service.info(
+                "distill: skipping \(conversationId) — distillation not opted in for agent \(agentId)"
+            )
+            logProcessing(
+                agentId: agentId, taskType: "distill", model: "none",
+                status: "skipped", details: "distillation_opted_out")
+            return
+        }
 
         guard let model = await resolveDistillModel() else {
             MemoryLogger.service.warning(

@@ -92,6 +92,29 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
     /// by the consolidator. Set to 0 to keep forever.
     public var episodeRetentionDays: Int
 
+    /// Per-agent opt-in for **distillation** — the cloud call in
+    /// `MemoryService.performDistillSession` that sends buffered conversation
+    /// turns to a remote provider for summarising. Keyed by agent UUID
+    /// string; absence of a key (or a `false` value) means "not opted in".
+    ///
+    /// This is deliberately separate from `enabled` above. `enabled` (and
+    /// the local recall/write path it gates in `ChatView`) stays on-device —
+    /// the embedder is `potion-base-8M`, a static local model, and nothing
+    /// leaves the machine — and keeps its current default. Distillation is
+    /// the one piece that talks to a cloud provider, and per the 2026-09-05
+    /// owner decision (docs/MEMORY_PLAN.md §2, §2b) it becomes opt-in per
+    /// agent, default OFF — a deliberate divergence from upstream (which
+    /// defaults distillation on) that must not be "corrected" back.
+    ///
+    /// Shape mirrors `RelayConfiguration.enabledAgents`
+    /// (Models/Configuration/RelayConfiguration.swift) — the existing
+    /// precedent in this codebase for a per-agent opt-in to a cloud/network
+    /// action — rather than a new field on `Agent` itself: this type doesn't
+    /// own `Models/Agent/Agent.swift`, and this map works identically for
+    /// the Default agent and every custom agent without needing a second
+    /// storage location.
+    public var distillationEnabledAgents: [String: Bool]
+
     // MARK: - Internal Constants (not user-configurable)
 
     /// Approximate characters per token for budget calculations. Coarse
@@ -129,7 +152,8 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
         summaryDebounceSeconds: Int = 60,
         consolidationIntervalHours: Int = 24,
         salienceFloor: Double = 0.2,
-        episodeRetentionDays: Int = 365
+        episodeRetentionDays: Int = 365,
+        distillationEnabledAgents: [String: Bool] = [:]
     ) {
         self.enabled = enabled
         self.embeddingBackend = embeddingBackend
@@ -145,6 +169,23 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
         self.consolidationIntervalHours = consolidationIntervalHours
         self.salienceFloor = salienceFloor
         self.episodeRetentionDays = episodeRetentionDays
+        self.distillationEnabledAgents = distillationEnabledAgents
+    }
+
+    /// Whether the given agent has opted in to cloud distillation. Default
+    /// OFF: an agent with no entry (including the Default agent, and every
+    /// agent created before this setting existed) has not opted in.
+    public func isDistillationEnabled(for agentId: UUID) -> Bool {
+        distillationEnabledAgents[agentId.uuidString] == true
+    }
+
+    /// Set (or clear) one agent's distillation opt-in. Storing `false`
+    /// removes the key entirely rather than persisting an explicit "off" —
+    /// mirrors `RelayConfiguration.setEnabled(_:for:)` so an agent that was
+    /// never touched and one explicitly opted out are indistinguishable
+    /// (both read back as "not opted in", which is what we want either way).
+    public mutating func setDistillationEnabled(_ enabled: Bool, for agentId: UUID) {
+        distillationEnabledAgents[agentId.uuidString] = enabled ? true : nil
     }
 
     /// Returns a copy with all values clamped to valid ranges.
@@ -186,6 +227,9 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
         salienceFloor = try c.decodeIfPresent(Double.self, forKey: .salienceFloor) ?? defaults.salienceFloor
         episodeRetentionDays =
             try c.decodeIfPresent(Int.self, forKey: .episodeRetentionDays) ?? defaults.episodeRetentionDays
+        distillationEnabledAgents =
+            try c.decodeIfPresent([String: Bool].self, forKey: .distillationEnabledAgents)
+            ?? defaults.distillationEnabledAgents
     }
 
     public static var `default`: MemoryConfiguration { MemoryConfiguration() }

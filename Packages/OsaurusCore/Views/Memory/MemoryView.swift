@@ -1079,29 +1079,30 @@ import SwiftUI
 
 /// Intel memory tab. The upstream `MemoryView` (the `#if !OSAURUS_INTEL` half)
 /// drives the MLX/VecturaKit distillation+episode subsystem; on Intel we expose
-/// the Phase-1 transcript-recall MVP across three tabs:
+/// the Phase-1 transcript-recall MVP across four tabs:
 ///  - **Identity**: the auto-derived identity narrative (written by
 ///    `IntelMemoryService.applyIdentityDelta`) plus user overrides.
 ///  - **Settings**: master toggle, embedding-backend picker (off / on-device
-///    static model2vec / cloud), recall budget, and clear-memory.
+///    static model2vec / cloud), recall budget, consolidation interval, and
+///    clear-memory.
 ///  - **Statistics**: distillation call counts and database size.
+///  - **Diagnostics**: pipeline health, bound to `MemoryDiagnostics.shared`
+///    (`Models/Chat/IntelConformers/IntelMemoryDiagnostics.swift`) — see
+///    `MemoryDiagnosticsViews.swift`'s `#else` branch for the view content.
 /// Storage is the SQLCipher-encrypted memory DB; embeddings are the pure-Swift
 /// `StaticEmbedder` or an OpenAI-compatible cloud API.
-///
-/// A `.diagnostics` case belongs on `MemoryTab` once `MemoryDiagnostics`
-/// (being built in parallel, see `docs/MEMORY_PLAN.md` §5) is ready to bind
-/// to — deliberately not added yet so this file doesn't reference a service
-/// contract still in flux.
 enum MemoryTab: String, CaseIterable, AnimatedTabItem {
     case identity = "Identity"
     case settings = "Settings"
     case statistics = "Statistics"
+    case diagnostics = "Diagnostics"
 
     var title: String {
         switch self {
         case .identity: return L("Identity")
         case .settings: return L("Settings")
         case .statistics: return L("Statistics")
+        case .diagnostics: return L("Diagnostics")
         }
     }
 }
@@ -1128,6 +1129,8 @@ struct MemoryView: View {
                     MemorySettingsTabContent()
                 case .statistics:
                     MemoryStatisticsTabContent()
+                case .diagnostics:
+                    MemoryDiagnosticsTabContent()
                 }
             }
             .opacity(hasAppeared ? 1 : 0)
@@ -1480,11 +1483,15 @@ private struct MemorySettingsTabContent: View {
     @State private var modelReady = false
     @State private var isDownloading = false
     @State private var downloadError: String?
+    @State private var isConsolidating = false
+    @State private var consolidationJustRan = false
+    @ObservedObject private var agentManager = AgentManager.shared
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 statusCard
+                distillationCard
                 embeddingCard
                 budgetCard
                 dangerCard
@@ -1617,23 +1624,84 @@ private struct MemorySettingsTabContent: View {
 
     private var budgetCard: some View {
         card {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    cardTitle("Memory budget")
-                    Text("Max tokens of recalled context added per message.", bundle: .module)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        cardTitle("Memory budget")
+                        Text("Max tokens of recalled context added per message.", bundle: .module)
+                            .font(.system(size: 11)).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer()
+                    Stepper(
+                        value: Binding(
+                            get: { config.memoryBudgetTokens },
+                            set: { v in mutate { $0.memoryBudgetTokens = v } }), in: 100...4000, step: 100
+                    ) {
+                        Text(verbatim: "\(config.memoryBudgetTokens)")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundColor(theme.primaryText)
+                    }
+                    .fixedSize()
+                }
+
+                Divider().opacity(0.5)
+
+                // Upstream places its manual "Run Now" trigger for
+                // `MemoryConsolidator` directly beside the consolidation
+                // interval stepper (`MemoryView.swift`'s `#if !OSAURUS_INTEL`
+                // half, "Consolidation" row). Mirrored here: the interval
+                // config already existed on `MemoryConfiguration`
+                // (`consolidationIntervalHours`), it just had no UI and no
+                // call site — `MemoryConsolidator.runNow()` only ever ran on
+                // its internal schedule before this.
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        cardTitle("Consolidation")
+                        Text(
+                            "How often decay, dedup, promotion, and eviction run in the background.",
+                            bundle: .module
+                        )
                         .font(.system(size: 11)).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Stepper(
+                            value: Binding(
+                                get: { config.consolidationIntervalHours },
+                                set: { v in mutate { $0.consolidationIntervalHours = v } }), in: 1...168
+                        ) {
+                            Text(
+                                verbatim: "every \(pluralizedMemory(config.consolidationIntervalHours, "hour"))"
+                            )
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundColor(theme.primaryText)
+                        }
+                        .fixedSize()
+                    }
+
+                    if consolidationJustRan {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(theme.successColor)
+                            .transition(.opacity)
+                    }
+
+                    Button {
+                        runConsolidationNow()
+                    } label: {
+                        Text(isConsolidating ? "Running..." : "Run Now", bundle: .module)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(theme.tertiaryBackground)
+                            )
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(isConsolidating || !config.enabled)
                 }
-                Spacer()
-                Stepper(
-                    value: Binding(
-                        get: { config.memoryBudgetTokens },
-                        set: { v in mutate { $0.memoryBudgetTokens = v } }), in: 100...4000, step: 100
-                ) {
-                    Text(verbatim: "\(config.memoryBudgetTokens)")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundColor(theme.primaryText)
-                }
-                .fixedSize()
             }
         }
     }
@@ -1653,6 +1721,94 @@ private struct MemorySettingsTabContent: View {
                 .controlSize(.small)
             }
         }
+    }
+
+    /// Per-agent opt-in for distillation.
+    ///
+    /// A deliberate divergence from upstream, which distills by default.
+    /// Distillation is the ONE part of memory that leaves the machine:
+    /// embedding and recall run on-device, but summarising a session into
+    /// an episode sends its content to a remote provider. So it is off
+    /// until asked for, per agent.
+    ///
+    /// The switches live here rather than buried in agent settings because
+    /// a default-off feature with no visible control is indistinguishable
+    /// from a broken one, and this fork has shipped several of those.
+    private var distillationCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 10) {
+                cardTitle("Distillation")
+                Text(
+                    "Summarising a conversation into long-term memory sends its content to the model below. Embedding and recall stay on this Mac; only this step leaves it.",
+                    bundle: .module
+                )
+                .font(.system(size: 12))
+                .foregroundColor(theme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+                if let model = distillModelName {
+                    Text(verbatim: model)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(theme.secondaryText.opacity(0.9))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(theme.primaryBackground.opacity(0.6)))
+                } else {
+                    Text(
+                        "No model is configured, so nothing can be distilled yet.",
+                        bundle: .module
+                    )
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText.opacity(0.8))
+                }
+
+                if !config.enabled {
+                    Text(
+                        "Memory is off, so distillation stays off regardless of these switches.",
+                        bundle: .module
+                    )
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText.opacity(0.8))
+                }
+
+                Divider().opacity(0.4)
+
+                ForEach(agentManager.agents) { agent in
+                    HStack(spacing: 10) {
+                        Text(verbatim: agent.displayName)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+                        Spacer()
+                        Toggle(
+                            "",
+                            isOn: Binding(
+                                get: { config.isDistillationEnabled(for: agent.id) },
+                                set: { on in
+                                    agentManager.updateDistillationEnabled(on, for: agent.id)
+                                    // The writer persists through the store; re-read so
+                                    // this view's copy matches disk instead of drifting.
+                                    config = MemoryConfigurationStore.load()
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(!config.enabled)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The model distillation would actually use. Mirrors the head of
+    /// `MemoryService.resolveDistillModel()`'s chain; the provider-discovery
+    /// fallback is omitted because naming a model the user never chose would
+    /// be more misleading here than saying nothing.
+    private var distillModelName: String? {
+        let cfg = ChatConfigurationStore.load()
+        if let core = cfg.coreModelIdentifier, !core.isEmpty { return core }
+        if let def = cfg.defaultModel, !def.isEmpty { return def }
+        return nil
     }
 
     // MARK: - Danger Zone Confirmation
@@ -1736,6 +1892,26 @@ private struct MemorySettingsTabContent: View {
                 await MainActor.run { downloadError = error.localizedDescription }
             }
             await MainActor.run { isDownloading = false }
+        }
+    }
+
+    private func runConsolidationNow() {
+        guard !isConsolidating else { return }
+        isConsolidating = true
+        consolidationJustRan = false
+        Task {
+            await MemoryConsolidator.shared.runNow()
+            await MainActor.run {
+                isConsolidating = false
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    consolidationJustRan = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        consolidationJustRan = false
+                    }
+                }
+            }
         }
     }
 

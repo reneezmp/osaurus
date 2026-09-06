@@ -286,6 +286,37 @@ final class AgentManager: ObservableObject, @unchecked Sendable {
     func effectiveMemoryDisabled(for agentId: UUID) -> Bool {
         !MemoryConfigurationStore.load().enabled
     }
+
+    /// Phase 3 (2026-09-05 owner decision, docs/MEMORY_PLAN.md §2/§2b — a
+    /// deliberate divergence from upstream, not to be "corrected" toward it):
+    /// cloud **distillation** — the `MemoryService.performDistillSession`
+    /// call that sends buffered turns to a remote provider for summarising —
+    /// is opt-in per agent, default OFF.
+    ///
+    /// Deliberately a SEPARATE accessor from `effectiveMemoryDisabled` above,
+    /// which keeps its current meaning and default and continues to gate
+    /// only the local, on-device recall/write path in `ChatView`
+    /// (transcript insert + indexing) — that path must not be disabled by
+    /// this change. This method governs distillation only.
+    ///
+    /// The whole-memory kill switch still wins: if memory itself is off for
+    /// this agent (or globally, via `effectiveMemoryDisabled`), distillation
+    /// can't run either, since it reads/writes through the same store. On
+    /// top of that, distillation additionally requires an explicit per-agent
+    /// opt-in recorded in `MemoryConfiguration.distillationEnabledAgents`
+    /// (Models/Memory/MemoryConfiguration.swift) — absence of an entry means
+    /// "not opted in", which is the default for every agent, including the
+    /// Default agent and every agent that existed before this setting did.
+    ///
+    /// This is the single source of truth `MemoryService` consults —
+    /// `bufferTurn` and `performDistillSession` both call this rather than
+    /// re-deriving the same logic, so there is exactly one place that can
+    /// get this wrong.
+    func effectiveDistillationDisabled(for agentId: UUID) -> Bool {
+        if effectiveMemoryDisabled(for: agentId) { return true }
+        return !MemoryConfigurationStore.load().isDistillationEnabled(for: agentId)
+    }
+
     // M12 follow-up (Renée 2026-06-03): real per-agent capability management,
     // backing the un-body-swapped AgentCapabilityManagerView. Mirrors the real
     // AgentManager (Managers/AgentManager.swift): custom agents persist to their
@@ -393,6 +424,25 @@ final class AgentManager: ObservableObject, @unchecked Sendable {
         agent.toolSelectionMode = mode
         update(agent)
     }
+
+    /// Writer for the Phase 3 distillation opt-in (see
+    /// `effectiveDistillationDisabled` above). No call site yet — this is
+    /// the API a future Memory-tab toggle binds to (the per-agent card in
+    /// `Views/Memory/MemoryView.swift` / `MemoryDiagnosticsViews.swift`,
+    /// currently owned by a parallel lane) so it can say "distillation is
+    /// off for this agent" and let the user turn it on. Uniform for the
+    /// Default agent and every custom agent, since the opt-in lives in
+    /// `MemoryConfiguration.distillationEnabledAgents` (keyed by agent UUID)
+    /// rather than on the `Agent` record itself — unlike
+    /// `updateToolSelectionMode` above, there's no Default-vs-custom branch
+    /// needed here.
+    func updateDistillationEnabled(_ enabled: Bool, for agentId: UUID) {
+        var config = MemoryConfigurationStore.load()
+        config.setDistillationEnabled(enabled, for: agentId)
+        MemoryConfigurationStore.save(config)
+        NotificationCenter.default.post(name: .agentUpdated, object: agentId)
+    }
+
     // AgentDetailView's sandbox section reads/writes
     // `AutonomousExecConfig` (the real type from Models/Agent/Agent.swift,
     // NOT excluded on Intel) — not the lightweight protocol
