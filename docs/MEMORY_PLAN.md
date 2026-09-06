@@ -132,6 +132,29 @@ Projects section in the Agents tab. No migration required.
 
 ---
 
+## 3b. Backlog (raised during testing, not yet scheduled)
+
+- **Chat export on Intel.** Removed from both menus in 1.0.34 because
+  `ChatSessionExportCoordinator` and `ExportChooserSheet` are excluded, so it
+  could never work. Owner wants it back — that means an Intel export path, not
+  just restoring the menu entry.
+- **Upstream's fuller project page.** This fork's project page is a
+  single-column instructions + chat list. Upstream's is a richer two-column
+  layout; port it, minus the amputated Knowledge dimension.
+- **Memories console gaps** (from the Phase 4 port, each needs a
+  `MemoryDatabase` change first): per-row disable — nothing here ever writes a
+  status other than `active`; per-turn transcript forget — only
+  `deleteTranscriptForConversation` exists; the storage-health panel — no public
+  schema-version accessor; the context preview's query field — the Intel
+  assembler takes no query by construction.
+- **Per-agent recall scoping.** Recall passes `agentId: nil`, so every agent
+  recalls every other agent's memories. Deliberate and documented, but worth
+  revisiting now that project scoping exists.
+- **Should an opted-out agent still feed its project's pool?** Upstream says
+  yes. Deliberately not ported — it is a values question, not a code one.
+
+---
+
 ## 4. Standing constraints
 
 - Check `Package.swift`'s `exclude:` list before reasoning about any file.
