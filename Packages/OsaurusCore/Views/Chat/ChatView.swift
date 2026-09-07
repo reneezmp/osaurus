@@ -391,6 +391,9 @@ final class ChatSession: ObservableObject {
         // notification entirely). `refreshPickerItems` short-circuits when
         // nothing changed, so this is cheap on the happy path.
         Task { [weak self] in
+            // Memory estimates do not depend on model discovery. The Intel
+            // window can start on the welcome screen before any model is cached.
+            await self?.refreshContextEstimates()
             await self?.refreshPickerItems()
         }
 
@@ -744,7 +747,8 @@ final class ChatSession: ObservableObject {
             context: preview,
             conversationTokens: conversationTokens,
             inputTokens: inputTokens,
-            outputTokens: outputTokens
+            outputTokens: outputTokens,
+            fallbackMemoryTokens: cachedMemoryTokens
         )
         #else
         // Mirror what `composeChatContext` will emit on the next send so

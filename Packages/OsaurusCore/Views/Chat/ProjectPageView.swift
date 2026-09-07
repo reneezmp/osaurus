@@ -17,6 +17,7 @@
 //  full-width scrollable page with its own header.
 //
 
+import AppKit
 import SwiftUI
 
 struct ProjectPageView: View {
@@ -50,6 +51,7 @@ struct ProjectPageView: View {
     @State private var query: String = ""
     @FocusState private var isSearchFocused: Bool
     @State private var showingAddChats = false
+    @State private var titlebarInset: CGFloat = 0
 
     private var project: Project? { projectManager.project(for: projectId) }
 
@@ -86,6 +88,16 @@ struct ProjectPageView: View {
                 .frame(maxWidth: .infinity)
             }
         }
+        // `ChatContentView` paints through the transparent full-size titlebar.
+        // Reserve this window's actual excluded top strip before the page
+        // header reaches the traffic lights; it changes with toolbar layout.
+        .padding(.top, titlebarInset)
+        .background(
+            TitlebarInsetReader { inset in
+                guard abs(titlebarInset - inset) > 0.5 else { return }
+                titlebarInset = inset
+            }
+        )
         .onAppear { loadInstructions() }
         // Leaving the page — back to a chat, or over to another project —
         // tears this view down, and the 600ms debounce does not survive that.
@@ -396,5 +408,113 @@ struct ProjectPageView: View {
         }
         .frame(width: 420, height: 480)
         .background(theme.primaryBackground)
+    }
+}
+
+/// Reads only the window hosting this view. `contentLayoutRect` is expressed
+/// in window coordinates, so convert it into the content view before finding
+/// the top strip that AppKit excludes from layout.
+private struct TitlebarInsetReader: NSViewRepresentable {
+    let onChange: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> TitlebarInsetView {
+        let view = TitlebarInsetView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: TitlebarInsetView, context: Context) {
+        nsView.onChange = onChange
+    }
+
+    final class TitlebarInsetView: NSView {
+        var onChange: ((CGFloat) -> Void)?
+        private weak var observedWindow: NSWindow?
+        private var layoutObservation: NSKeyValueObservation?
+        private var resizeObserver: NSObjectProtocol?
+        private var observationGeneration = 0
+        private var pendingInset: CGFloat?
+        private weak var pendingWindow: NSWindow?
+        private var pendingGeneration = 0
+        private var hasPendingCallback = false
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observeWindow()
+        }
+
+        deinit {
+            stopObservingWindow()
+        }
+
+        func reportInset() {
+            guard let window, let contentView = window.contentView else {
+                deferInset(0, for: nil)
+                return
+            }
+            let layoutRect = contentView.convert(window.contentLayoutRect, from: nil)
+            let inset = contentView.isFlipped
+                ? layoutRect.minY - contentView.bounds.minY
+                : contentView.bounds.maxY - layoutRect.maxY
+            deferInset(max(0, inset), for: window)
+        }
+
+        private func observeWindow() {
+            guard window !== observedWindow else {
+                reportInset()
+                return
+            }
+            stopObservingWindow()
+            guard let window else {
+                deferInset(0, for: nil)
+                return
+            }
+
+            observedWindow = window
+            layoutObservation = window.observe(\.contentLayoutRect, options: [.initial, .new]) { [weak self] _, _ in
+                self?.reportInset()
+            }
+            resizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResizeNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.reportInset()
+            }
+            reportInset()
+        }
+
+        private func deferInset(_ inset: CGFloat, for window: NSWindow?) {
+            pendingInset = inset
+            pendingWindow = window
+            pendingGeneration = observationGeneration
+            guard !hasPendingCallback else { return }
+            hasPendingCallback = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.hasPendingCallback = false
+                let inset = self.pendingInset
+                let expectedWindow = self.pendingWindow
+                let expectedGeneration = self.pendingGeneration
+                self.pendingInset = nil
+
+                guard expectedGeneration == self.observationGeneration,
+                      self.window === expectedWindow,
+                      let inset
+                else { return }
+                self.onChange?(inset)
+            }
+        }
+
+        private func stopObservingWindow() {
+            observationGeneration &+= 1
+            layoutObservation = nil
+            if let resizeObserver {
+                NotificationCenter.default.removeObserver(resizeObserver)
+                self.resizeObserver = nil
+            }
+            observedWindow = nil
+        }
     }
 }

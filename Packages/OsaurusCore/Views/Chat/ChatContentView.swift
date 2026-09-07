@@ -153,7 +153,10 @@ struct ChatContentView: View {
                             agentId: aId,
                             currentSessionId: sessId,
                             width: sidebarWidth,
-                            onSelect: { [weak windowState] data in windowState?.loadSession(data) },
+                            onSelect: { [weak windowState] data in
+                                windowState?.openProjectId = nil
+                                windowState?.loadSession(data)
+                            },
                             onNewChat: { [weak windowState] in windowState?.startNewChat() },
                             onDelete: { [weak windowState] id in
                                 guard let windowState else { return }

@@ -1378,7 +1378,7 @@ private struct MemoryIdentityTabContent: View {
                             Divider().opacity(0.5)
                         }
                         MemoryOverrideRow(content: content) {
-                            removeOverride(index: index)
+                            removeOverride(index: index, expectedText: content)
                         }
                     }
                 }
@@ -1504,9 +1504,9 @@ private struct MemoryIdentityTabContent: View {
         reload()
     }
 
-    private func removeOverride(index: Int) {
+    private func removeOverride(index: Int, expectedText: String) {
         do {
-            try MemoryDatabase.shared.removeIdentityOverride(at: index)
+            try MemoryDatabase.shared.removeIdentityOverride(at: index, expectedText: expectedText)
             errorMessage = nil
         } catch {
             MemoryLogger.database.error("Failed to remove override: \(error)")

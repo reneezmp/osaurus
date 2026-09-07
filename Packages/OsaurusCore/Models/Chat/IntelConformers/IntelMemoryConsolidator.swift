@@ -227,6 +227,14 @@ public actor MemoryConsolidator {
         let started = Date()
         MemoryLogger.service.info("MemoryConsolidator: starting pass")
 
+        let identityDuplicates: Int
+        do {
+            identityDuplicates = try MemoryDatabase.shared.deduplicateIdentityOverrides()
+        } catch {
+            MemoryLogger.service.warning("MemoryConsolidator: identity cleanup failed: \(error)")
+            identityDuplicates = 0
+        }
+
         do {
             try MemoryDatabase.shared.decayPinnedSalience(halfLifeDays: MemoryConfiguration.salienceHalfLifeDays)
             try MemoryDatabase.shared.decayEpisodeSalience(halfLifeDays: MemoryConfiguration.salienceHalfLifeDays)
@@ -276,6 +284,7 @@ public actor MemoryConsolidator {
         let details =
             "merged=\(mergedCount) promoted=\(promotedCount) evicted=\(evictedCount) "
             + "prunedEpisodes=\(prunedEpisodes) prunedTranscript=\(prunedTurns) "
+            + "identityDuplicates=\(identityDuplicates) "
             + "[merge: \(lastMergeDiagnostics)]"
         do {
             try MemoryDatabase.shared.insertProcessingLog(

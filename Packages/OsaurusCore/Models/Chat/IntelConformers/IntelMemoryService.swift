@@ -433,8 +433,7 @@ public actor MemoryService {
 
             // Apply identity delta: append new identity-grade facts to overrides.
             if !parsed.identityFacts.isEmpty {
-                applyIdentityDelta(
-                    facts: parsed.identityFacts, currentIdentity: identity, model: model)
+                applyIdentityDelta(facts: parsed.identityFacts, model: model)
             }
 
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -659,24 +658,16 @@ public actor MemoryService {
 
     private func applyIdentityDelta(
         facts: [String],
-        currentIdentity: Identity,
         model: String
     ) {
-        let existing = Set(currentIdentity.overrides.map { $0.lowercased() })
-        var updated = currentIdentity
-        var added = 0
-        for raw in facts {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !existing.contains(trimmed.lowercased()) else { continue }
-            updated.overrides.append(trimmed)
-            added += 1
+        let added: Int
+        do {
+            added = try db.appendIdentityOverrides(facts, model: model)
+        } catch {
+            MemoryLogger.service.error("identity: save failed: \(error)")
+            return
         }
         guard added > 0 else { return }
-        updated.model = model
-        updated.generatedAt = Self.iso8601Now()
-        do { try db.saveIdentity(updated) } catch {
-            MemoryLogger.service.error("identity: save failed: \(error)")
-        }
         MemoryLogger.service.info("identity: appended \(added) new fact(s)")
     }
 

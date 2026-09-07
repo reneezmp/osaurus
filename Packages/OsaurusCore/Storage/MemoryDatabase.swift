@@ -1040,17 +1040,71 @@ public final class MemoryDatabase: @unchecked Sendable {
     // MARK: - Identity
 
     public func loadIdentity() throws -> Identity? {
+        try queue.sync {
+            guard let connection = db else { throw MemoryDatabaseError.notOpen }
+            return try Self.loadIdentity(on: connection)
+        }
+    }
+
+    public func saveIdentity(_ identity: Identity) throws {
+        try queue.sync {
+            guard let connection = db else { throw MemoryDatabaseError.notOpen }
+            try Self.saveIdentity(on: connection, identity: identity)
+        }
+    }
+
+    /// Append identity facts while holding the database queue and transaction.
+    /// The row is read inside the transaction, so this operation cannot
+    /// overwrite edits or appends committed before the transaction began.
+    @discardableResult
+    public func appendIdentityOverrides(_ facts: [String], model: String) throws -> Int {
+        try inTransaction { connection in
+            var identity = try Self.loadIdentity(on: connection) ?? Identity()
+            var seen = Set(identity.overrides.map { TextSimilarity.identityOverrideKey($0) })
+            var added = 0
+            for raw in facts {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                let key = TextSimilarity.identityOverrideKey(trimmed)
+                guard !trimmed.isEmpty, !key.isEmpty, seen.insert(key).inserted else { continue }
+                identity.overrides.append(trimmed)
+                added += 1
+            }
+            guard added > 0 else { return 0 }
+            identity.model = model
+            identity.generatedAt = ISO8601DateFormatter().string(from: Date())
+            try Self.saveIdentity(on: connection, identity: identity)
+            return added
+        }
+    }
+
+    /// Remove only syntactic duplicate identity overrides atomically. The
+    /// first original text and every other identity field are preserved.
+    @discardableResult
+    public func deduplicateIdentityOverrides() throws -> Int {
+        try inTransaction { connection in
+            guard var identity = try Self.loadIdentity(on: connection) else { return 0 }
+            let deduplicated = TextSimilarity.deduplicatedIdentityOverrides(identity.overrides)
+            let removed = identity.overrides.count - deduplicated.count
+            guard removed > 0 else { return 0 }
+            identity.overrides = deduplicated
+            try Self.saveIdentity(on: connection, identity: identity)
+            return removed
+        }
+    }
+
+    private static func loadIdentity(on connection: OpaquePointer) throws -> Identity? {
         var identity: Identity?
         try prepareAndExecute(
+            on: connection,
             "SELECT content, overrides, token_count, version, model, generated_at FROM identity WHERE id = 1",
             bind: { _ in },
             process: { stmt in
                 if sqlite3_step(stmt) == SQLITE_ROW {
                     let content = String(cString: sqlite3_column_text(stmt, 0))
                     let overridesJSON = String(cString: sqlite3_column_text(stmt, 1))
-                    let overrides =
-                        (overridesJSON.data(using: .utf8))
-                        .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+                    let overrides = (overridesJSON.data(using: .utf8)).flatMap {
+                        try? JSONDecoder().decode([String].self, from: $0)
+                    } ?? []
                     identity = Identity(
                         content: content,
                         overrides: overrides,
@@ -1065,10 +1119,11 @@ public final class MemoryDatabase: @unchecked Sendable {
         return identity
     }
 
-    public func saveIdentity(_ identity: Identity) throws {
+    private static func saveIdentity(on connection: OpaquePointer, identity: Identity) throws {
         let overridesJSON =
             (try? JSONEncoder().encode(identity.overrides)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         _ = try executeUpdate(
+            on: connection,
             """
             INSERT INTO identity (id, content, overrides, token_count, version, model, generated_at)
             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
@@ -1091,26 +1146,43 @@ public final class MemoryDatabase: @unchecked Sendable {
     }
 
     public func setIdentityOverrides(_ overrides: [String]) throws {
-        var current = try loadIdentity() ?? Identity()
-        current.overrides = overrides
-        try saveIdentity(current)
+        try inTransaction { connection in
+            var current = try Self.loadIdentity(on: connection) ?? Identity()
+            current.overrides = overrides
+            try Self.saveIdentity(on: connection, identity: current)
+        }
     }
 
     public func appendIdentityOverride(_ text: String) throws {
-        var current = try loadIdentity() ?? Identity()
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        let lowered = trimmed.lowercased()
-        guard !current.overrides.contains(where: { $0.lowercased() == lowered }) else { return }
-        current.overrides.append(trimmed)
-        try saveIdentity(current)
+        try inTransaction { connection in
+            var current = try Self.loadIdentity(on: connection) ?? Identity()
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = TextSimilarity.identityOverrideKey(trimmed)
+            guard !trimmed.isEmpty, !key.isEmpty else { return }
+            let seen = Set(current.overrides.map { TextSimilarity.identityOverrideKey($0) })
+            guard !seen.contains(key) else { return }
+            current.overrides.append(trimmed)
+            try Self.saveIdentity(on: connection, identity: current)
+        }
     }
 
-    public func removeIdentityOverride(at index: Int) throws {
-        var current = try loadIdentity() ?? Identity()
-        guard index >= 0, index < current.overrides.count else { return }
-        current.overrides.remove(at: index)
-        try saveIdentity(current)
+    /// When the UI supplies `expectedText`, delete that displayed value rather
+    /// than trusting an index that a concurrent deduplication pass may have
+    /// shifted. The index-only form remains for existing callers.
+    public func removeIdentityOverride(at index: Int, expectedText: String? = nil) throws {
+        try inTransaction { connection in
+            var current = try Self.loadIdentity(on: connection) ?? Identity()
+            let targetIndex: Int
+            if let expectedText {
+                guard let matchedIndex = current.overrides.firstIndex(of: expectedText) else { return }
+                targetIndex = matchedIndex
+            } else {
+                guard index >= 0, index < current.overrides.count else { return }
+                targetIndex = index
+            }
+            current.overrides.remove(at: targetIndex)
+            try Self.saveIdentity(on: connection, identity: current)
+        }
     }
 
     // MARK: - Pinned Facts

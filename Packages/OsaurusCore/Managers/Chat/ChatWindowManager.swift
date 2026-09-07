@@ -1255,7 +1255,10 @@ final class IntelChatToolbarDelegate: NSObject, NSToolbarDelegate {
     ) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: identifier)
         let hosting = NSHostingView(rootView: rootView)
-        hosting.frame = NSRect(origin: .zero, size: hosting.fittingSize)
+        // The centered item changes width when its project chip, agent name,
+        // or sidebar padding changes. Let AppKit follow SwiftUI's intrinsic
+        // size instead of freezing the initial fitting size and clipping it.
+        hosting.sizingOptions = [.intrinsicContentSize]
         item.view = hosting
         item.isBordered = false
         return item
@@ -1336,16 +1339,17 @@ private struct IntelToolbarAgentView: View {
     @ObservedObject var windowState: ChatWindowState
     @State private var openPickerTrigger: Int = 0
     /// Same key `ChatContentView` persists the sidebar width under, so the
-    /// offset below tracks a drag-resize without any extra plumbing.
+    /// leading padding below tracks a drag-resize without extra plumbing.
     @AppStorage("chatSidebarWidth") private var storedSidebarWidth: Double = 240
 
     /// `centeredItemIdentifier` centres this item on the window. The chat
     /// area starts after the sidebar, so its centre is half the sidebar
-    /// width to the right of the window's. Shifting by that much puts the
-    /// pill over the conversation it labels instead of over the divider.
-    private var chatAreaOffset: CGFloat {
+    /// width to the right of the window's. A centred item's leading padding
+    /// moves its content by half that padding, so use the full sidebar width
+    /// to centre the pill over the conversation it labels.
+    private var chatAreaLeadingPadding: CGFloat {
         guard windowState.showSidebar else { return 0 }
-        return CGFloat(max(0, min(600, storedSidebarWidth))) / 2
+        return CGFloat(max(0, min(600, storedSidebarWidth)))
     }
 
     var body: some View {
@@ -1384,7 +1388,7 @@ private struct IntelToolbarAgentView: View {
                     openPickerTrigger &+= 1
                 }
                 }
-                .offset(x: chatAreaOffset)
+                .padding(.leading, chatAreaLeadingPadding)
             }
         }
         .environment(\.theme, windowState.theme)

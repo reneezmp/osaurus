@@ -1891,7 +1891,8 @@ struct ContextBreakdown: Sendable {
         context composed: ComposedContext,
         conversationTokens: Int = 0,
         inputTokens: Int = 0,
-        outputTokens: Int = 0
+        outputTokens: Int = 0,
+        fallbackMemoryTokens: Int = 0
     ) -> ContextBreakdown {
         // The Intel `ComposedContext` DOES carry the real system prompt and a
         // tool-token estimate (see `SystemPromptComposer.composeChatContext`),
@@ -1934,7 +1935,9 @@ struct ContextBreakdown: Sendable {
         // and belongs on the rail. This mirror previously omitted it
         // entirely — the excluded upstream builder derives it the same way,
         // from `composed.memorySection`.
-        let memoryTokens = composed.memorySection.map { ContextBudgetManager.estimateTokens(for: $0) } ?? 0
+        let memoryTokens = composed.memorySection.map {
+            $0.isEmpty ? 0 : ContextBudgetManager.estimateTokens(for: $0)
+        } ?? fallbackMemoryTokens
         if memoryTokens > 0 {
             bd.context.append(Entry(id: "memory", label: "Memory", tokens: memoryTokens, tint: .teal))
         }

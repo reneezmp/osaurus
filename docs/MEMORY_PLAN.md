@@ -323,3 +323,62 @@ intended semantics before changing behaviour — this may be upstream's design.
 2. D1 — decide between the three options above before writing code.
 3. D4.
 4. D5 with more samples; D6; D7 after checking upstream.
+
+
+## Follow-up implementation — 2026-09-07 (unreleased)
+
+The original test report above is preserved. Current follow-up status:
+
+- **D3 patched:** sidebar selection clears `openProjectId` before loading the
+  selected session.
+- **D2 patched:** project content reserves the hosting window's measured
+  titlebar exclusion, rather than assuming a fixed height. Runtime verification
+  on both supported boots remains required.
+- **D1 patched, option 1 selected:** the toolbar hosting view publishes its
+  intrinsic size, and full-sidebar-width leading padding replaces the half-width
+  offset. Because the complete item is window-centred, that padding moves its
+  visible content by half the sidebar width. A disposable native-window harness
+  verified host resizing as an ordinary project chip appears and an agent label
+  grows. Oversized items remain subject to normal toolbar compression; both-boot
+  app checks with narrow windows and long labels remain required.
+- **D4 patched:** the Intel welcome preview passes its cached memory estimate to
+  the context breakdown. Actual composed memory takes precedence, including an
+  explicitly empty section. Initial session creation now refreshes estimates
+  independently of model discovery; the old `applyInitialModelSelection` caller
+  was in the inactive non-Intel window-state branch.
+- **D5 remains open:** no additional persisted `bestSim` samples were available
+  in the inspected local logs/backups; the Intel development data root was absent.
+  Keep the threshold at **0.90**. Collect additional distinct corpus snapshots or
+  pair-score distributions before tuning; repeated runs over identical vectors
+  are not independent evidence.
+- **D6 partially addressed:** conservative identity normalization handles case,
+  whitespace, typographic punctuation, and the introductory article in user facts.
+  Distillation deduplicates within a batch against the latest stored identity;
+  consolidation removes the same safe duplicate forms. Database mutations are
+  atomic and preserve the retained original text/order. Broader semantic overlaps
+  remain open: Jaccard alone can discard different values or negated facts, so no
+  fuzzy threshold or model-based cleanup is introduced.
+- **D7 resolved as upstream intent, unchanged:** local upstream reference
+  `098cbd4ed1e9a6ae496bc342f3cd9f168394d65c`,
+  `Managers/Chat/ChatWindowState.swift:307`, explicitly starts a fresh chat when
+  switching agents. `/agent` opens the same picker; it does not reassign the
+  current conversation. Changing that behavior would be a deliberate divergence.
+
+Validation for this follow-up:
+
+- `swift build --arch x86_64` — passed.
+- `swift test --no-parallel` — **707 tests / 104 suites passed**. One prior run
+  hit the documented `LiveExecRegistryTests.entriesPublisherEmitsOnRegister`
+  timing flake; the full rerun passed without changes to that test.
+- `xcodebuild -workspace osaurus.xcworkspace -scheme osaurus -configuration Debug
+  -arch x86_64 -skipPackagePluginValidation -skipMacroValidation
+  -derivedDataPath build/rosy-deploy ONLY_ACTIVE_ARCH=NO
+  MACOSX_DEPLOYMENT_TARGET=13.0 CODE_SIGNING_ALLOWED=NO build` — passed.
+  The resulting app's Mach-O metadata confirms `minos 13.0`.
+- `git diff --check` — passed.
+- Both-boot visual verification is still pending for these new changes.
+
+The identity list also deletes by the displayed original text, so cleanup shifting
+indices cannot make a stale row action delete a different fact. Regression tests
+cover this alongside fallback precedence, empty composed memory, identity batch
+deduplication, retained text/order, and metadata preservation.

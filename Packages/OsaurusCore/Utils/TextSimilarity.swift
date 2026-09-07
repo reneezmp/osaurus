@@ -12,6 +12,39 @@ import CryptoKit
 import Foundation
 
 public enum TextSimilarity {
+    /// Stable comparison key for identity overrides. This deliberately only
+    /// removes presentation differences; it does not infer semantic overlap.
+    public static func identityOverrideKey(_ text: String) -> String {
+        let punctuationNormalized = text
+            .replacingOccurrences(of: "\u{2018}", with: "'")
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+            .replacingOccurrences(of: "\u{201C}", with: "\"")
+            .replacingOccurrences(of: "\u{201D}", with: "\"")
+            .replacingOccurrences(of: "\u{2013}", with: "-")
+            .replacingOccurrences(of: "\u{2014}", with: "-")
+        let collapsed = punctuationNormalized
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        // Restrict article removal to the identity template's subject. A
+        // general "The X" → "X" rule could conflate entities such as The Who.
+        if collapsed.hasPrefix("the user ") || collapsed.hasPrefix("the user's ") {
+            return String(collapsed.dropFirst(4))
+        }
+        return collapsed
+    }
+
+    /// Keeps the first original spelling and order for syntactic duplicates.
+    public static func deduplicatedIdentityOverrides(_ overrides: [String]) -> [String] {
+        var seen = Set<String>()
+        return overrides.filter {
+            let key = identityOverrideKey($0)
+            guard !key.isEmpty else { return true }
+            return seen.insert(key).inserted
+        }
+    }
+
     /// Tokenize a string into a lowercase word set for reuse across multiple comparisons.
     public static func tokenize(_ text: String) -> Set<String> {
         Set(text.lowercased().split(separator: " ").map(String.init))
