@@ -1191,22 +1191,26 @@ final class IntelChatToolbarDelegate: NSObject, NSToolbarDelegate {
     /// it has one) and reopens that project's detail sheet. Empty/hidden
     /// otherwise; always present in the toolbar so we don't need to
     /// reconfigure `NSToolbar`'s item set at runtime.
-    static let projectItem = NSToolbarItem.Identifier("IntelChatToolbar.project")
     static let agentItem = NSToolbarItem.Identifier("IntelChatToolbar.agent")
     static let actionItem = NSToolbarItem.Identifier("IntelChatToolbar.action")
 
-    /// Layout mirrors upstream exactly:
-    ///   [sidebar, project, flexibleSpace, agent, flexibleSpace, action]
-    /// where upstream's equivalent of `projectItem` is its `backItem`.
+    /// Layout: [sidebar, flexibleSpace, agent, flexibleSpace, action].
     ///
-    /// The agent pill MUST be the only item between the two flexible spaces.
-    /// `centeredItemIdentifier` is set to it, and putting a second item
-    /// inside that group pushes the pill visibly off-centre. An earlier
-    /// change moved `projectItem` next to the pill to make the chip easier
-    /// to find; it did that at the cost of the centring, so the chip is
-    /// back where upstream keeps it, on the leading edge.
+    /// Diverges from upstream, which carries its back-to-project chip as a
+    /// separate leading item. Two problems with that here, both observed:
+    /// the leading edge sits above the sidebar, so the chip read as sidebar
+    /// chrome and went unnoticed repeatedly; and `centeredItemIdentifier`
+    /// centres on the WINDOW, so with a sidebar open the pill sat left of
+    /// the chat area it belongs to. Moving the chip into the centred group
+    /// fixed discoverability but broke centring, and moving it back fixed
+    /// centring but lost discoverability.
+    ///
+    /// So `projectItem` is gone as a toolbar item: `IntelToolbarAgentView`
+    /// renders the chip and the pill together as one centred item, and
+    /// offsets itself by half the sidebar width so the pair sits centred
+    /// over the chat area rather than the window.
     private static let ids: [NSToolbarItem.Identifier] = [
-        sidebarItem, projectItem, .flexibleSpace, agentItem, .flexibleSpace, actionItem,
+        sidebarItem, .flexibleSpace, agentItem, .flexibleSpace, actionItem,
     ]
 
     private weak var windowState: ChatWindowState?
@@ -1233,11 +1237,6 @@ final class IntelChatToolbarDelegate: NSObject, NSToolbarDelegate {
         switch itemIdentifier {
         case Self.sidebarItem:
             return host(itemIdentifier, IntelToolbarSidebarView(windowState: windowState))
-        case Self.projectItem:
-            return host(
-                itemIdentifier,
-                IntelToolbarProjectView(windowState: windowState, session: windowState.session)
-            )
         case Self.agentItem:
             return host(itemIdentifier, IntelToolbarAgentView(windowState: windowState))
         case Self.actionItem:
@@ -1336,6 +1335,18 @@ private struct IntelToolbarProjectView: View {
 private struct IntelToolbarAgentView: View {
     @ObservedObject var windowState: ChatWindowState
     @State private var openPickerTrigger: Int = 0
+    /// Same key `ChatContentView` persists the sidebar width under, so the
+    /// offset below tracks a drag-resize without any extra plumbing.
+    @AppStorage("chatSidebarWidth") private var storedSidebarWidth: Double = 240
+
+    /// `centeredItemIdentifier` centres this item on the window. The chat
+    /// area starts after the sidebar, so its centre is half the sidebar
+    /// width to the right of the window's. Shifting by that much puts the
+    /// pill over the conversation it labels instead of over the divider.
+    private var chatAreaOffset: CGFloat {
+        guard windowState.showSidebar else { return 0 }
+        return CGFloat(max(0, min(600, storedSidebarWidth))) / 2
+    }
 
     var body: some View {
         // Bug fix: when a project page is open in the window's main
@@ -1346,7 +1357,10 @@ private struct IntelToolbarAgentView: View {
         // layout rather than leaving an invisible-but-occupied gap.
         Group {
             if windowState.openProjectId == nil {
-                AgentPill(
+                HStack(spacing: 8) {
+                    IntelToolbarProjectView(
+                        windowState: windowState, session: windowState.session)
+                    AgentPill(
                     agents: windowState.agents,
                     activeAgentId: windowState.agentId,
                     onSelectAgent: { windowState.switchAgent(to: $0) },
@@ -1369,6 +1383,8 @@ private struct IntelToolbarAgentView: View {
                     else { return }
                     openPickerTrigger &+= 1
                 }
+                }
+                .offset(x: chatAreaOffset)
             }
         }
         .environment(\.theme, windowState.theme)
