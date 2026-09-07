@@ -152,11 +152,8 @@ The cache layer holds the assembled block for 10s per (agent, query) pair so ret
 
 `MemoryConsolidator` runs on a low-priority background task every `consolidationIntervalHours` (default 24h) and on the explicit **Run Consolidation Now** button in the Memory UI. Each pass:
 
-1. **Merge (first)** — collapse near-duplicates in *all three stores* on one threshold, `episodeMergeCosineThreshold` (default `0.9`, the **Memory → Settings → Merge threshold** slider; lower it to merge more eagerly). Pass log reports `merged=` (episodes), `mergedPinned=`, `mergedOverrides=`, `dedupedOverrides=`:
-   - **Episodes** — cosine over stored embeddings, same agent; keeps the older digest.
-   - **Pinned facts** — cosine over stored embeddings (word-overlap fallback when a vector is missing), same agent; keeps the higher-salience copy.
-   - **Identity overrides** — word-overlap folding, global; keeps the longer wording, and never merges polarity-conflicting pairs (a "likes X" can't be folded into a "dislikes X").
-2. **Decay** — `salience *= exp(-Δdays / 30)` for both pinned facts and episodes.
+1. **Decay** — `salience *= exp(-Δdays / 30)` for both pinned facts and episodes.
+2. **Merge** — collapse near-duplicate episodes within the same agent whose similarity is ≥ `episodeMergeCosineThreshold` (default `0.9`, range `0.0 – 1.0`). Keeps the older episode, deletes the newer near-dup. The threshold is a user setting on this fork: **Memory → Settings → Merge threshold**, directly below the consolidation row. Lower it to merge more eagerly; the consolidator logs the active value each pass (`bestSim=… threshold=…`).
 3. **Promote** — boost salience on pinned facts whose content overlaps with ≥ 3 recent episodes.
 4. **Evict** — delete pinned facts below `salienceFloor` that have been idle for 30+ days.
 5. **Prune** — drop episodes and transcript turns older than `episodeRetentionDays`.
@@ -182,7 +179,7 @@ The full configuration lives in `~/.osaurus/config/memory.json` and is editable 
 | `consolidationIntervalHours` | `24` | 1 – 168 | How often the consolidator runs |
 | `salienceFloor` | `0.2` | 0.0 – 1.0 | Pinned facts below this and idle 30+ days are evicted |
 | `episodeRetentionDays` | `365` | 0 – 3,650 | How long episodes/transcript are kept (0 = forever) |
-| `episodeMergeCosineThreshold` | `0.9` | 0.0 – 1.0 | Similarity above which consolidation merges near-duplicate episodes, pinned facts, and identity overrides. Lower = merge more eagerly. Name retains "Episode" from its origin; it now governs all three stores. |
+| `episodeMergeCosineThreshold` | `0.9` | 0.0 – 1.0 | Similarity above which consolidation merges two near-duplicate episodes. Lower = merge more eagerly. (Intel fork: user-configurable.) |
 
 That's the entire surface. v1's 18 knobs (`mmrLambda`, `mmrFetchMultiplier`, `verification*Threshold`, per-section budgets, recall topK, profile regen thresholds, max entries per agent, …) are all gone.
 

@@ -1092,51 +1092,6 @@ public final class MemoryDatabase: @unchecked Sendable {
         }
     }
 
-    /// Fuzzy counterpart of `deduplicateIdentityOverrides`: fold override
-    /// pairs whose word-overlap is ≥ `threshold` into a single override,
-    /// keeping the longer (more specific) wording. Runs after the safe exact
-    /// dedup, so this only sees paraphrases the normalized-key pass cannot
-    /// collapse ("the model I prefer is Claude" vs "her preferred model is
-    /// Claude", say).
-    ///
-    /// Safety: pairs whose wording differs on polarity — one side gains a
-    /// negation/opposition term the other lacks (`TextSimilarity.polarityConflict`)
-    /// — are never merged, so a correction ("no longer", "doesn't like") cannot
-    /// be folded into its opposite. This is the 2026-09-07 owner decision to
-    /// extend merging to identity overrides; the guard is what keeps that safe.
-    public func mergeSimilarIdentityOverrides(threshold: Double) throws -> Int {
-        try inTransaction { connection in
-            guard var identity = try Self.loadIdentity(on: connection) else { return 0 }
-            guard !identity.overrides.isEmpty else { return 0 }
-            var list = identity.overrides
-            var merged = 0
-            var changed = true
-            while changed {
-                changed = false
-                outer: for i in 0 ..< list.count {
-                    for j in (i + 1) ..< list.count {
-                        let a = list[i]
-                        let b = list[j]
-                        let sim = TextSimilarity.jaccardTokenized(
-                            TextSimilarity.shingleSet(a), TextSimilarity.shingleSet(b))
-                        guard sim >= threshold, !TextSimilarity.polarityConflict(a, b) else { continue }
-                        // Keep the longer (more specific) wording; on a tie keep the
-                        // earlier entry. Drop the other.
-                        let dropIndex = a.count < b.count ? i : j
-                        list.remove(at: dropIndex)
-                        merged += 1
-                        changed = true
-                        break outer
-                    }
-                }
-            }
-            guard merged > 0 else { return 0 }
-            identity.overrides = list
-            try Self.saveIdentity(on: connection, identity: identity)
-            return merged
-        }
-    }
-
     private static func loadIdentity(on connection: OpaquePointer) throws -> Identity? {
         var identity: Identity?
         try prepareAndExecute(
@@ -1226,36 +1181,6 @@ public final class MemoryDatabase: @unchecked Sendable {
                 targetIndex = index
             }
             current.overrides.remove(at: targetIndex)
-            try Self.saveIdentity(on: connection, identity: current)
-        }
-    }
-
-    /// Replace one override's text (the UI's "edit" action). The row is read
-    /// and written inside the same transaction as `append`/`remove`. Replacing
-    /// with a value whose normalized key already exists elsewhere simply drops
-    /// the edited entry — the edited text collapses into the duplicate rather
-    /// than creating a second copy. Editing needs no re-embedding: identity
-    /// overrides are plain strings injected verbatim, never stored as vectors.
-    public func replaceIdentityOverride(at index: Int, with newText: String, expectedText: String? = nil) throws {
-        try inTransaction { connection in
-            var current = try Self.loadIdentity(on: connection) ?? Identity()
-            let targetIndex: Int
-            if let expectedText {
-                guard let matchedIndex = current.overrides.firstIndex(of: expectedText) else { return }
-                targetIndex = matchedIndex
-            } else {
-                guard index >= 0, index < current.overrides.count else { return }
-                targetIndex = index
-            }
-            current.overrides.remove(at: targetIndex)
-            let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let key = TextSimilarity.identityOverrideKey(trimmed)
-            if !trimmed.isEmpty, !key.isEmpty {
-                let seen = Set(current.overrides.map { TextSimilarity.identityOverrideKey($0) })
-                if !seen.contains(key) {
-                    current.overrides.append(trimmed)
-                }
-            }
             try Self.saveIdentity(on: connection, identity: current)
         }
     }

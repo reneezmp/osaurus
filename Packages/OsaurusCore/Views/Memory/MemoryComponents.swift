@@ -401,7 +401,6 @@ struct MemoryOverrideRow: View {
 
     let content: String
     let onDelete: () -> Void
-    var onEdit: (() -> Void)?
 
     @State private var isHovering = false
 
@@ -419,15 +418,6 @@ struct MemoryOverrideRow: View {
             Spacer()
 
             if isHovering {
-                if let onEdit {
-                    Button(action: onEdit) {
-                        Image(systemName: "pencil.circle")
-                            .font(.system(size: 14))
-                            .foregroundColor(theme.tertiaryText)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help(Text("Edit override"))
-                }
                 Button(action: onDelete) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 14))
@@ -958,7 +948,6 @@ struct MemoryOverrideRow: View {
 
     let content: String
     let onDelete: () -> Void
-    var onEdit: (() -> Void)?
 
     @State private var isHovering = false
 
@@ -976,15 +965,6 @@ struct MemoryOverrideRow: View {
             Spacer()
 
             if isHovering {
-                if let onEdit {
-                    Button(action: onEdit) {
-                        Image(systemName: "pencil.circle")
-                            .font(.system(size: 14))
-                            .foregroundColor(theme.tertiaryText)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help(Text("Edit override"))
-                }
                 Button(action: onDelete) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 14))
@@ -1209,124 +1189,6 @@ struct AddOverrideSheet: View {
         .background(theme.primaryBackground)
         .environment(\.theme, themeManager.currentTheme)
         .onAppear { isFocused = true }
-    }
-}
-
-// MARK: - Edit Override Sheet
-
-/// Pre-filled editor for one identity override (the pencil action on
-/// `MemoryOverrideRow`). Editing needs no re-embedding — overrides are plain
-/// strings injected verbatim and are never stored as vectors, so a text swap
-/// is all there is to it.
-struct OverrideEditSheet: View {
-    let initialText: String
-    let onSave: (String) -> Void
-
-    @ObservedObject private var themeManager = ThemeManager.shared
-    private var theme: ThemeProtocol { themeManager.currentTheme }
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var text = ""
-    @FocusState private var isFocused: Bool
-
-    private var trimmedText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Edit Override", bundle: .module)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(theme.primaryText)
-                    Text("Change an explicit fact that should always be in your identity", bundle: .module)
-                        .font(.system(size: 12))
-                        .foregroundColor(theme.tertiaryText)
-                }
-                Spacer()
-                Button(action: { dismiss() }) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(theme.secondaryText)
-                        .frame(width: 28, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6).fill(theme.tertiaryBackground)
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-            .padding(20)
-
-            Divider().opacity(0.5)
-
-            TextField(text: $text, prompt: Text("e.g., My name is Terence", bundle: .module)) {
-                Text("e.g., My name is Terence", bundle: .module)
-            }
-            .textFieldStyle(.plain)
-            .font(.system(size: 13))
-            .focused($isFocused)
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(theme.inputBackground)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(
-                                isFocused ? theme.accentColor.opacity(0.5) : theme.inputBorder,
-                                lineWidth: isFocused ? 1.5 : 1
-                            )
-                    )
-            )
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-
-            Divider().opacity(0.5)
-
-            HStack {
-                Spacer()
-
-                Button(action: { dismiss() }) {
-                    Text("Cancel", bundle: .module)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(theme.primaryText)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(theme.tertiaryBackground)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(theme.inputBorder, lineWidth: 1)
-                                )
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
-
-                Button {
-                    guard !trimmedText.isEmpty else { return }
-                    onSave(trimmedText)
-                    dismiss()
-                } label: {
-                    Text("Save", bundle: .module)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(theme.accentColor))
-                }
-                .buttonStyle(PlainButtonStyle())
-                .disabled(trimmedText.isEmpty)
-                .opacity(trimmedText.isEmpty ? 0.5 : 1)
-            }
-            .padding(20)
-        }
-        .background(theme.primaryBackground)
-        .environment(\.theme, themeManager.currentTheme)
-        .onAppear {
-            text = initialText
-            isFocused = true
-        }
     }
 }
 
