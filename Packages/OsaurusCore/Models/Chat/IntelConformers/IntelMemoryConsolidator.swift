@@ -242,7 +242,7 @@ public actor MemoryConsolidator {
             MemoryLogger.service.warning("MemoryConsolidator: decay step failed: \(error)")
         }
 
-        let mergedCount = mergeNearDuplicateEpisodes()
+        let mergedCount = mergeNearDuplicateEpisodes(threshold: config.episodeMergeCosineThreshold)
         let promotedCount = promotePinnedCandidates()
 
         var evictedCount = 0
@@ -319,7 +319,7 @@ public actor MemoryConsolidator {
     /// diagnosable, and that ambiguity cost a round of guesswork.
     private var lastMergeDiagnostics: String = "considered=0 embedded=0"
 
-    private func mergeNearDuplicateEpisodes() -> Int {
+    private func mergeNearDuplicateEpisodes(threshold: Double) -> Int {
         let embedded =
             (try? MemoryDatabase.shared.loadEmbeddedEpisodes(
                 days: Self.unboundedHistoryDays, limit: 2000
@@ -344,7 +344,7 @@ public actor MemoryConsolidator {
                     guard vecI.count == vecJ.count, !vecI.isEmpty else { continue }
                     let sim = Double(MemorySearchService.cosine(vecI, vecJ))
                     if sim > bestSimilarity { bestSimilarity = sim }
-                    guard sim >= MemoryConfiguration.episodeMergeCosineThreshold else { continue }
+                    guard sim >= threshold else { continue }
 
                     // Keep the older episode; delete the newer near-dup.
                     let keep = epI.conversationAt <= epJ.conversationAt ? epI : epJ
@@ -362,8 +362,7 @@ public actor MemoryConsolidator {
 
         lastMergeDiagnostics =
             "considered=\(embedded.count) embedded=\(embeddedCount) "
-            + String(format: "bestSim=%.2f threshold=%.2f", bestSimilarity,
-                MemoryConfiguration.episodeMergeCosineThreshold)
+            + String(format: "bestSim=%.2f threshold=%.2f", bestSimilarity, threshold)
         return merged
     }
 

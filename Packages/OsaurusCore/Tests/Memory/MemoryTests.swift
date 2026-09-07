@@ -54,6 +54,7 @@ struct MemoryConfigurationTests {
         #expect(config.relevanceGateMode == .heuristic)
         #expect(config.salienceFloor == 0.2)
         #expect(config.episodeRetentionDays == 365)
+        #expect(config.episodeMergeCosineThreshold == 0.9)
         #expect(config.consolidationIntervalHours == 24)
     }
 
@@ -63,6 +64,7 @@ struct MemoryConfigurationTests {
         let config = try JSONDecoder().decode(MemoryConfiguration.self, from: data)
         #expect(config.enabled == false)
         #expect(config.memoryBudgetTokens == 800)
+        #expect(config.episodeMergeCosineThreshold == 0.9)
         #expect(config.embeddingBackend == "mlx")
     }
 
@@ -82,11 +84,13 @@ struct MemoryConfigurationTests {
         config.summaryDebounceSeconds = -5
         config.salienceFloor = -1.0
         config.consolidationIntervalHours = -1
+        config.episodeMergeCosineThreshold = -1.0
         let validated = config.validated()
         #expect(validated.memoryBudgetTokens == 100)
         #expect(validated.summaryDebounceSeconds == 10)
         #expect(validated.salienceFloor == 0.0)
         #expect(validated.consolidationIntervalHours == 1)
+        #expect(validated.episodeMergeCosineThreshold == 0.0)
     }
 
     @Test func validationClampsExcessiveValues() {
@@ -94,10 +98,12 @@ struct MemoryConfigurationTests {
         config.memoryBudgetTokens = 999_999
         config.consolidationIntervalHours = 999_999
         config.episodeRetentionDays = 999_999
+        config.episodeMergeCosineThreshold = 1.5
         let validated = config.validated()
         #expect(validated.memoryBudgetTokens == 4000)
         #expect(validated.consolidationIntervalHours == 168)
         #expect(validated.episodeRetentionDays == 3650)
+        #expect(validated.episodeMergeCosineThreshold == 1.0)
     }
 }
 

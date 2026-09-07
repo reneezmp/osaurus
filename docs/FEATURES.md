@@ -1170,7 +1170,7 @@ All three search services use VecturaKit (hybrid BM25 + vector search):
 - `Storage/MemoryDatabase.swift` — SQLite with WAL mode; v5 schema with light carry-over from v1
 - `Models/Memory/MemoryModels.swift` — `Identity`, `PinnedFact`, `Episode`, `TranscriptTurn`, `PendingSignal`
 - `Models/Memory/MemoryConfiguration.swift` — User-configurable settings with validation
-- `Views/Memory/MemoryView.swift` — Identity, overrides, agents, statistics, "Run Consolidation Now"
+- `Views/Memory/MemoryView.swift` — Identity, overrides, agents, statistics, "Run Consolidation Now", the episode-merge threshold slider (Memory → Settings)
 
 **Three Layers + Transcript:**
 
@@ -1209,7 +1209,7 @@ No per-turn LLM call. No verification pipeline. Most chitchat sessions produce z
 | Step | What it does |
 |------|--------------|
 | Decay | `salience *= 0.5 ^ (Δdays / halfLife)` for pinned facts and episodes (halfLife=30d) |
-| Merge | Collapse near-duplicate episodes (shingle-Jaccard ≥ 0.9) within the same agent |
+| Merge | Collapse near-duplicate episodes whose similarity ≥ `episodeMergeCosineThreshold` (default 0.9) within the same agent |
 | Promote | Boost salience on pinned facts whose content overlaps ≥ 3 recent episodes |
 | Evict | Delete pinned facts below `salienceFloor` and idle for 30+ days |
 | Prune | Drop episodes / transcript older than `episodeRetentionDays` |
@@ -1237,8 +1237,9 @@ Reverse maps from VecturaKit UUIDs to episode/transcript composite keys are buil
 | `consolidationIntervalHours` | 24 | 1 -- 168 |
 | `salienceFloor` | 0.2 | 0.0 -- 1.0 |
 | `episodeRetentionDays` | 365 | 0 -- 3,650 |
+| `episodeMergeCosineThreshold` | 0.9 | 0.0 -- 1.0 (Memory → Settings slider: 0.50 -- 1.00) |
 
-Eight settings total, down from v1's 18. The per-section budget knobs, MMR tuning, verification thresholds, profile regen thresholds, and `maxEntriesPerAgent` are gone.
+Nine settings total, down from v1's 18. The per-section budget knobs, MMR tuning, verification thresholds, profile regen thresholds, and `maxEntriesPerAgent` are gone. `episodeMergeCosineThreshold` was added back as a user control on the Intel fork (2026-09-07) because the inherited 0.9 constant proved too strict against this fork's 256-dim embedder.
 
 **Tool API:** `search_memory(scope, query)` with three scopes: `pinned`, `episodes`, `transcript`. Replaces v1's five-scope tool.
 

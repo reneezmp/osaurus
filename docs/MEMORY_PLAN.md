@@ -351,6 +351,9 @@ The original test report above is preserved. Current follow-up status:
   Keep the threshold at **0.90**. Collect additional distinct corpus snapshots or
   pair-score distributions before tuning; repeated runs over identical vectors
   are not independent evidence.
+  **SUPERSEDED later the same day** (owner decision): rather than keep tuning a
+  constant against an unmeasurable corpus, the threshold became a user setting.
+  See the merge-threshold section below.
 - **D6 partially addressed:** conservative identity normalization handles case,
   whitespace, typographic punctuation, and the introductory article in user facts.
   Distillation deduplicates within a batch against the latest stored identity;
@@ -382,3 +385,68 @@ The identity list also deletes by the displayed original text, so cleanup shifti
 indices cannot make a stale row action delete a different fact. Regression tests
 cover this alongside fallback precedence, empty composed memory, identity batch
 deduplication, retained text/order, and metadata preservation.
+
+---
+
+# Test results — 2026-09-07, D-fix follow-up build (commit `2eb5b8ac`) on Rosy
+
+Round that verifies the follow-up implementation above (the build shipped to Rosy
+this morning from a clean tree at `2eb5b8ac`). Every previously open defect now
+closes. A second Rosy round then verified the merge-threshold feature added below.
+
+## Passed
+
+- **Launch & basic layout** — working.
+- **D1** (toolbar agent-pill clipping) — working.
+- **D2** (project page header vs. traffic lights) — working.
+- **D3** (sidebar chat click while on the project page) — working. Owner note:
+  opening a project page leaves the sidebar showing the project list rather than
+  that project's chats; chats live in the project page's own list. Accepted as
+  current UX — everything works under those conditions. Worth re-checking when
+  the richer two-column upstream project page (§3b backlog) is ported.
+- **D4** (memory rail on the welcome screen) — working.
+- **D6** (identity-override near-duplicates) — working.
+- **D7** (`/agent` semantics) — resolved as upstream intent.
+- **Quick project & memory regressions** — working.
+
+## New feature — configurable episode-merge threshold (supersedes D5)
+
+Requested during this round ("0.9 is still too high for me"): `0.9` was catching
+near-duplicate episodes only at the very top of the distribution, so similar-but-
+not-identical episodes survived consolidation. Rather than guess at a new constant
+against a corpus we cannot yet measure well, the owner asked for a control.
+
+- `MemoryConfiguration.episodeMergeCosineThreshold` (new stored setting, default
+  **0.9**, validated `0.0 – 1.0`, tolerant `decodeIfPresent`). The former static
+  `MemoryConfiguration.episodeMergeCosineThreshold` constant is gone.
+- Both consolidators (`Services/Memory/MemoryConsolidator.swift` and the Intel
+  mirror `Models/Chat/IntelConformers/IntelMemoryConsolidator.swift`) now read the
+  threshold from the loaded config instead of a constant; the Intel pass already
+  logs the active value (`bestSim=… threshold=…`), so tuning stays observable.
+- **Memory → Settings → Merge threshold**: a `0.50 – 1.00` slider directly below
+  the Consolidation row, matching the existing row layout, persisting through the
+  same `mutate`/`save` path as the interval stepper.
+- Default unchanged keeps untouched installs byte-for-byte equivalent; only an
+  owner who lowers it changes behaviour.
+
+This also retires the D5 concern about comparing cosine across embedding spaces
+(MLX 768-dim vs. this fork's `potion-base-8M` 256-dim): a user control sidesteps
+the comparability problem entirely.
+
+**Verification on Rosy:** owner dragged the threshold down and confirmed merges
+now behave as wanted — *"worked perfectly!"* No further corpus instrumentation is
+blocking.
+
+## Validation for this round
+
+- `scripts/build/build_rosy.sh` (Debug x86_64, canonical `~/.osaurus`, stable
+  `Osaurus Intel Code Signing` identity) — passed.
+- `codesign --verify --deep --strict` on the built app — passed.
+- `swift test --no-parallel` — **707 tests / 104 suites passed**.
+- `git diff --check` — passed.
+- New-config expectations were added to `Tests/Memory/MemoryTests.swift`
+  (defaults, decode-with-missing-key, clamps). Note that suite is in
+  `Package.swift`'s `exclude:` list, so the expectations document rather than
+  gate until that suite is re-enabled.
+- Fresh Rosy deploy zip built and round-trip verified (symlinks + signature
+  intact after unzip).

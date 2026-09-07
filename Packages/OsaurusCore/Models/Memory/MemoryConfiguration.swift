@@ -92,6 +92,18 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
     /// by the consolidator. Set to 0 to keep forever.
     public var episodeRetentionDays: Int
 
+    /// Cosine similarity above which the consolidator treats two episodes
+    /// of the same agent as near-duplicates and merges them (keeping the
+    /// older). Higher = only merge when near-identical (fewer merges);
+    /// lower = merge more eagerly (fewer near-duplicate episodes kept).
+    ///
+    /// Previously an internal constant (`0.9`). Made user-configurable on
+    /// 2026-09-07 at the owner's request after a Rosy test round found the
+    /// fixed 0.9 too strict — real conversations left too many near-duplicate
+    /// episodes unmerged. Default intentionally unchanged (0.9) so existing
+    /// behavior is preserved until an owner lowers it.
+    public var episodeMergeCosineThreshold: Double
+
     /// Per-agent opt-in for **distillation** — the cloud call in
     /// `MemoryService.performDistillSession` that sends buffered conversation
     /// turns to a remote provider for summarising. Keyed by agent UUID
@@ -133,8 +145,6 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
     /// Number of episodes a candidate must appear in before the
     /// consolidator promotes it to a `pinned_fact`.
     public static let pinnedPromotionThreshold = 3
-    /// Cosine similarity above which the consolidator merges two episodes.
-    public static let episodeMergeCosineThreshold = 0.9
     /// Default LIMIT for the SQLite text-search fallback path.
     public static let fallbackSearchLimit = 20
 
@@ -153,6 +163,7 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
         consolidationIntervalHours: Int = 24,
         salienceFloor: Double = 0.2,
         episodeRetentionDays: Int = 365,
+        episodeMergeCosineThreshold: Double = 0.9,
         distillationEnabledAgents: [String: Bool] = [:]
     ) {
         self.enabled = enabled
@@ -169,6 +180,7 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
         self.consolidationIntervalHours = consolidationIntervalHours
         self.salienceFloor = salienceFloor
         self.episodeRetentionDays = episodeRetentionDays
+        self.episodeMergeCosineThreshold = episodeMergeCosineThreshold
         self.distillationEnabledAgents = distillationEnabledAgents
     }
 
@@ -196,6 +208,7 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
         c.consolidationIntervalHours = max(1, min(c.consolidationIntervalHours, 168))
         c.salienceFloor = max(0.0, min(c.salienceFloor, 1.0))
         c.episodeRetentionDays = max(0, min(c.episodeRetentionDays, 3650))
+        c.episodeMergeCosineThreshold = max(0.0, min(c.episodeMergeCosineThreshold, 1.0))
         c.embeddingDimensionality = max(1, min(c.embeddingDimensionality, 8192))
         return c
     }
@@ -227,6 +240,9 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
         salienceFloor = try c.decodeIfPresent(Double.self, forKey: .salienceFloor) ?? defaults.salienceFloor
         episodeRetentionDays =
             try c.decodeIfPresent(Int.self, forKey: .episodeRetentionDays) ?? defaults.episodeRetentionDays
+        episodeMergeCosineThreshold =
+            try c.decodeIfPresent(Double.self, forKey: .episodeMergeCosineThreshold)
+            ?? defaults.episodeMergeCosineThreshold
         distillationEnabledAgents =
             try c.decodeIfPresent([String: Bool].self, forKey: .distillationEnabledAgents)
             ?? defaults.distillationEnabledAgents

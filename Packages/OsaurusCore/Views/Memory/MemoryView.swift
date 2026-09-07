@@ -1814,6 +1814,44 @@ private struct MemorySettingsTabContent: View {
                     .buttonStyle(PlainButtonStyle())
                     .disabled(isConsolidating || !config.enabled)
                 }
+
+                Divider().opacity(0.5)
+
+                // Episode-merge similarity threshold — user-configurable as of
+                // 2026-09-07. It used to be the internal constant
+                // `MemoryConfiguration.episodeMergeCosineThreshold` (0.9); a
+                // Rosy test round found 0.9 too strict — near-duplicate
+                // episodes survived consolidation. The consolidators now read
+                // `config.episodeMergeCosineThreshold`; this is the control
+                // that writes it. Default stays 0.9, so untouched installs
+                // behave exactly as before.
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        cardTitle("Merge threshold")
+                        Text(
+                            "How similar two episode summaries must be before consolidation merges them. Drag left to merge more eagerly.",
+                            bundle: .module
+                        )
+                        .font(.system(size: 11)).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Slider(
+                            value: Binding(
+                                get: { config.episodeMergeCosineThreshold },
+                                set: { v in mutate { $0.episodeMergeCosineThreshold = v } }
+                            ),
+                            in: 0.50 ... 1.0,
+                            step: 0.01
+                        )
+                        .frame(width: 140)
+                        Text(String(format: "%.2f", config.episodeMergeCosineThreshold))
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundColor(theme.primaryText)
+                            .monospacedDigit()
+                    }
+                    .fixedSize()
+                }
             }
         }
     }

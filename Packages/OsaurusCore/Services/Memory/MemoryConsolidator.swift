@@ -84,7 +84,7 @@ public actor MemoryConsolidator {
             MemoryLogger.service.warning("Consolidator: decay step failed: \(error)")
         }
 
-        let mergedCount = await mergeNearDuplicateEpisodes()
+        let mergedCount = await mergeNearDuplicateEpisodes(threshold: config.episodeMergeCosineThreshold)
         let promotedCount = await promotePinnedCandidates()
 
         do {
@@ -147,7 +147,7 @@ public actor MemoryConsolidator {
 
     // MARK: - Episode merge
 
-    private func mergeNearDuplicateEpisodes() async -> Int {
+    private func mergeNearDuplicateEpisodes(threshold: Double) async -> Int {
         let episodes = (try? MemoryDatabase.shared.loadEpisodes(limit: 1000)) ?? []
         guard episodes.count > 1 else { return 0 }
 
@@ -165,7 +165,7 @@ public actor MemoryConsolidator {
                 for j in (i + 1) ..< withShingles.count {
                     if consumed.contains(withShingles[j].0.id) { continue }
                     let sim = TextSimilarity.jaccardTokenized(withShingles[i].1, withShingles[j].1)
-                    if sim >= MemoryConfiguration.episodeMergeCosineThreshold {
+                    if sim >= threshold {
                         // Keep the older episode; delete the newer near-dup.
                         let keep =
                             withShingles[i].0.conversationAt <= withShingles[j].0.conversationAt
