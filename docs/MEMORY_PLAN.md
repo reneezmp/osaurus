@@ -209,3 +209,117 @@ New file `Models/Chat/IntelConformers/IntelMemoryDiagnostics.swift`:
 
 `MemoryProcessingLogEntry` and `MemoryAgentDiagnostic` are defined by the service
 lane; the UI lane binds to them by the field names above.
+
+---
+
+# Test results — 2026-09-07, build `1.0.34-memory-test3` (Ventura + Sequoia)
+
+Commits under test: `bd7b085d`, `3e11f3fb`, `b84c8f6a`, `8d9233c6`, `b0b7a798`,
+`029d3f80`, `e036ea97`, `00e6c0fd`.
+
+## Passed
+
+- Memory tab fidelity, all four reported differences closed: tab counts +
+  Diagnostics badge, Agents tab row layout, Diagnostics card layout, per-agent
+  `on` / `off (this agent)` + Enable.
+- Distillation opt-in, Identity tab, Memories console, Agents tab, project-scoped
+  memory, consolidation run — all working.
+- **Ventura passed everything**, including the new Agents/Diagnostics iconography
+  and the five-tab bar with counts. No blank symbols, no List-spacing gaps.
+- Regression: project route, New Chat in project, back-chip, agent picker,
+  settings gear, New Chat all fine.
+- The memory rail now appears in the context budget **for an existing chat**.
+
+## Open defects
+
+### D1 — Toolbar item clips the agent pill (HIGH, blocks the toolbar work)
+Symptoms: only part of the pill renders; shrinking the chat area makes it vanish
+entirely; collapsing the sidebar makes it render fully.
+
+Root cause CONFIRMED. `IntelChatToolbarDelegate.host(_:_:)`
+(`ChatWindowManager.swift:1257-1258`) sizes the hosting view **once**, at
+creation:
+
+    let hosting = NSHostingView(rootView: rootView)
+    hosting.frame = NSRect(origin: .zero, size: hosting.fittingSize)
+
+That frame is never recomputed. The chat-area centring added in `00e6c0fd`
+applies `.offset(x: sidebarWidth / 2)`, which moves content **outside** that
+fixed frame, so it is clipped — and the frame was measured before the project
+chip existed, so the combined chip+pill is wider than the box it lives in.
+
+The `.offset` approach is therefore incompatible with a fixed-size
+`NSHostingView`. Options for next session, in rough order of preference:
+1. Let the hosting view size itself (Auto Layout / `translatesAutoresizing…
+   = false`), so the frame tracks its content, and express the shift as leading
+   padding rather than an offset — padding grows the frame, an offset does not.
+2. Recompute `hosting.frame` when the content changes (needs a size-change
+   signal out of SwiftUI; fragile).
+3. Abandon chat-area centring, keep the combined chip+pill, accept
+   window-centring. Loses the fix but is stable.
+
+### D2 — Project page header collides with the window controls (HIGH)
+On the project page the page's own header (back chevron, folder glyph, title,
+rename pencil) draws over the traffic lights. The toolbar items are correctly
+hidden there, which leaves the titlebar strip empty, but the page content starts
+at y=0 and runs underneath it. Needs a top inset for the titlebar height on that
+route.
+
+### D3 — Clicking a sidebar chat while on the project page does nothing (HIGH)
+CONFIRMED at `ChatContentView.swift:156`:
+
+    onSelect: { [weak windowState] data in windowState?.loadSession(data) },
+
+It loads the session but never clears `openProjectId`, so the route stays on the
+project page and the click appears to do nothing. Every other exit from the
+project page clears it; this one was missed. One-line fix.
+
+### D4 — Memory rail absent on the welcome screen (MEDIUM)
+It appears in an existing chat, but not in the pre-first-message budget. The
+welcome path goes through `from(context:)`, whose `composed.memorySection` is nil
+before there is a query to recall against, and `cachedMemoryTokens` — which
+exists precisely to estimate this case — is not threaded into that path. Either
+route the welcome preview through the manifest overload, or have `from(context:)`
+fall back to the cached estimate when `memorySection` is nil.
+
+### D5 — Episode merge threshold is very slightly too strict (MEDIUM)
+The instrumentation answered it on the first run:
+
+    merged=0 … [merge: considered=27 embedded=27 bestSim=0.89 threshold=0.9]
+
+Embeddings are fine — 27 of 27 episodes carry vectors. The most similar pair
+scored **0.89** against a **0.90** threshold.
+
+`episodeMergeCosineThreshold = 0.9` is inherited verbatim from upstream, but
+upstream computes similarity with a different embedder (MLX, 768-dim) while this
+fork uses the 256-dim `potion-base-8M` static model. Cosine distributions are not
+comparable across embedding spaces, so the constant should not have been
+inherited unexamined. Do NOT simply lower it to 0.85 by feel — gather a few more
+`bestSim` samples first, and consider making it configurable.
+
+### D6 — Identity overrides accumulate near-duplicates (MEDIUM, newly found)
+Observed in the live overrides list: *"The user's name is Renée."* and *"User's
+name is Renée."* both present; three overlapping Brisa entries; four overlapping
+entries about the 2017 MacBook and the M4.
+
+`IntelMemoryService.applyIdentityDelta` dedupes case-insensitively on **exact**
+string match, so paraphrases always survive. Consolidation never touches identity
+overrides at all. Check what upstream does here before designing a fix; the
+Jaccard helper already used for pinned-fact dedup is the obvious candidate.
+
+### D7 — `/agent` starts a new chat instead of switching the current one (MEDIUM)
+The picker opens and a selection can be made, but it opens a blank session with
+that agent rather than re-assigning the open conversation. Confirm upstream's
+intended semantics before changing behaviour — this may be upstream's design.
+
+## Decisions taken
+
+- The Memories console's "Include disabled" toggle stays absent. Confirmed by the
+  owner rather than assumed.
+
+## Suggested order for the next session
+
+1. D3 (one line), then D2 — both make the project route usable again.
+2. D1 — decide between the three options above before writing code.
+3. D4.
+4. D5 with more samples; D6; D7 after checking upstream.
