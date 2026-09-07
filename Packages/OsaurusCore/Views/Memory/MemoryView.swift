@@ -1210,6 +1210,16 @@ struct MemoryView: View {
 
 // MARK: - Identity Tab
 
+/// Identifiable handle for the "edit this override" sheet — carries the
+/// override's index plus its displayed text so the sheet can pre-fill and so
+/// the save path can target the row by its original text (robust even if a
+/// concurrent consolidation pass has shifted indices meanwhile).
+private struct OverrideEditTarget: Identifiable {
+    let id = UUID()
+    let index: Int
+    let text: String
+}
+
 /// Displays the auto-derived identity narrative and user overrides, both
 /// read straight from `MemoryDatabase` — there is no separate Intel
 /// "identity service" to bind to. `identity.content` is written by
@@ -1225,6 +1235,7 @@ private struct MemoryIdentityTabContent: View {
     @State private var databaseOpen = false
     @State private var showEditSheet = false
     @State private var showAddOverride = false
+    @State private var overrideEditTarget: OverrideEditTarget?
     @State private var errorMessage: String?
 
     // "Distill pending" / "Sync" (Bug 2 — ported from upstream, which wires
@@ -1272,6 +1283,12 @@ private struct MemoryIdentityTabContent: View {
         .sheet(isPresented: $showAddOverride) {
             AddOverrideSheet(onAdd: addOverride)
                 .frame(minWidth: 440, minHeight: 220)
+        }
+        .sheet(item: $overrideEditTarget) { target in
+            OverrideEditSheet(initialText: target.text) { newText in
+                saveOverrideEdit(at: target.index, originalText: target.text, newText: newText)
+            }
+            .frame(minWidth: 440, minHeight: 220)
         }
     }
 
@@ -1377,9 +1394,11 @@ private struct MemoryIdentityTabContent: View {
                         if index > 0 {
                             Divider().opacity(0.5)
                         }
-                        MemoryOverrideRow(content: content) {
-                            removeOverride(index: index, expectedText: content)
-                        }
+                        MemoryOverrideRow(
+                            content: content,
+                            onDelete: { removeOverride(index: index, expectedText: content) },
+                            onEdit: { overrideEditTarget = OverrideEditTarget(index: index, text: content) }
+                        )
                     }
                 }
             }
@@ -1511,6 +1530,17 @@ private struct MemoryIdentityTabContent: View {
         } catch {
             MemoryLogger.database.error("Failed to remove override: \(error)")
             errorMessage = L("Failed to remove override")
+        }
+        reload()
+    }
+
+    private func saveOverrideEdit(at index: Int, originalText: String, newText: String) {
+        do {
+            try MemoryDatabase.shared.replaceIdentityOverride(at: index, with: newText, expectedText: originalText)
+            errorMessage = nil
+        } catch {
+            MemoryLogger.database.error("Failed to edit override: \(error)")
+            errorMessage = L("Failed to edit override")
         }
         reload()
     }
@@ -1817,19 +1847,22 @@ private struct MemorySettingsTabContent: View {
 
                 Divider().opacity(0.5)
 
-                // Episode-merge similarity threshold — user-configurable as of
-                // 2026-09-07. It used to be the internal constant
-                // `MemoryConfiguration.episodeMergeCosineThreshold` (0.9); a
-                // Rosy test round found 0.9 too strict — near-duplicate
-                // episodes survived consolidation. The consolidators now read
-                // `config.episodeMergeCosineThreshold`; this is the control
-                // that writes it. Default stays 0.9, so untouched installs
-                // behave exactly as before.
+                // Merge threshold — one control for every store's
+                // near-duplicate merge (owner decision 2026-09-07). Originally
+                // the episodes-only constant
+                // `MemoryConfiguration.episodeMergeCosineThreshold` (0.9), then
+                // a user setting for episodes; consolidation now merges
+                // near-duplicates across identity overrides, pinned facts and
+                // episodes in one phase before the other steps, all governed by
+                // this knob. Episodes & pinned facts compare by stored-embedding
+                // cosine (pinned facts: text fallback); identity overrides by
+                // word overlap, never folding polarity conflicts. Default stays
+                // 0.9, so untouched installs behave exactly as before.
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         cardTitle("Merge threshold")
                         Text(
-                            "How similar two episode summaries must be before consolidation merges them. Drag left to merge more eagerly.",
+                            "How similar two stored memories must be before consolidation merges them into one. Applies to episodes, pinned facts, and identity overrides. Drag left to merge more eagerly.",
                             bundle: .module
                         )
                         .font(.system(size: 11)).foregroundColor(theme.secondaryText)

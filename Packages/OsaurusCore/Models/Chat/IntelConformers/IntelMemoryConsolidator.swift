@@ -9,22 +9,23 @@
 //  facts and episodes never decay, near-duplicate episodes never merge,
 //  nothing gets promoted or evicted, and the transcript grows forever.
 //
-//  This actor reimplements the same five steps against the tables and
+//  This actor reimplements the same steps against the tables and
 //  methods `MemoryDatabase` already ships (decay/evict/prune are storage-
 //  layer concerns and were never the missing piece — the orchestration was):
 //
-//    1. Salience decay      — `MemoryDatabase.decayPinnedSalience` /
+//    1. Merge phase (FIRST — owner decision 2026-09-07) — fold near-duplicates
+//       in all three stores on one threshold (the "Merge threshold" slider):
+//         a. Identity overrides  — safe exact dedup, then word-overlap
+//            folding; keeps the longer wording, never merges polarity
+//            conflicts (`MemoryDatabase.mergeSimilarIdentityOverrides`).
+//         b. Pinned facts        — cosine over each row's stored embedding,
+//            word-overlap fallback; keeps the higher-salience copy
+//            (`mergePinnedFacts` below).
+//         c. Episodes            — cosine over stored embeddings, keeps the
+//            older digest (existing step, re-ordered into this phase).
+//    2. Salience decay      — `MemoryDatabase.decayPinnedSalience` /
 //                             `decayEpisodeSalience`, half-life from
 //                             `MemoryConfiguration.salienceHalfLifeDays`.
-//    2. Episode merge       — near-duplicate episodes from the same agent,
-//                             compared by real cosine similarity over the
-//                             embeddings already stored on each episode row
-//                             (`MemoryDatabase.loadEmbeddedEpisodes`), using
-//                             the same `MemorySearchService.cosine` the recall
-//                             path uses. No new embedding calls are made —
-//                             episodes without a stored vector (embeddings
-//                             disabled, or distilled before an embedder was
-//                             configured) simply sit out this step.
 //    3. Pinned promotion    — facts whose content overlaps (word-shingle
 //                             Jaccard) at least `pinnedPromotionThreshold`
 //                             recent episodes get a small salience boost.
@@ -227,13 +228,38 @@ public actor MemoryConsolidator {
         let started = Date()
         MemoryLogger.service.info("MemoryConsolidator: starting pass")
 
-        let identityDuplicates: Int
+        // Merge phase — fold near-duplicates in ALL three stores before any
+        // other step (owner decision 2026-09-07), so decay, promotion,
+        // eviction and pruning all see a deduplicated pool. One threshold
+        // (`MemoryConfiguration.episodeMergeCosineThreshold`, the "Merge
+        // threshold" slider) governs every store: episodes and pinned facts
+        // compare by stored-embedding cosine, identity overrides by word
+        // overlap. Pinned facts keep their higher-salience copy; overrides
+        // keep the longer wording (never merging polarity-conflicting pairs).
+        let mergeThreshold = config.episodeMergeCosineThreshold
+
+        // 1. Identity overrides — exact normalized dedup first (catches the
+        //    "the user's X" / "X" forms), then fuzzy near-duplicate folding.
+        let dedupedOverrides: Int
         do {
-            identityDuplicates = try MemoryDatabase.shared.deduplicateIdentityOverrides()
+            dedupedOverrides = try MemoryDatabase.shared.deduplicateIdentityOverrides()
         } catch {
             MemoryLogger.service.warning("MemoryConsolidator: identity cleanup failed: \(error)")
-            identityDuplicates = 0
+            dedupedOverrides = 0
         }
+        let mergedOverrides: Int
+        do {
+            mergedOverrides = try MemoryDatabase.shared.mergeSimilarIdentityOverrides(threshold: mergeThreshold)
+        } catch {
+            MemoryLogger.service.warning("MemoryConsolidator: override merge failed: \(error)")
+            mergedOverrides = 0
+        }
+
+        // 2. Pinned facts — cosine over stored vectors (word-overlap fallback).
+        let mergedPinned = mergePinnedFacts(threshold: mergeThreshold)
+
+        // 3. Episodes — cosine over stored vectors (existing step).
+        let mergedEpisodes = mergeNearDuplicateEpisodes(threshold: mergeThreshold)
 
         do {
             try MemoryDatabase.shared.decayPinnedSalience(halfLifeDays: MemoryConfiguration.salienceHalfLifeDays)
@@ -242,7 +268,6 @@ public actor MemoryConsolidator {
             MemoryLogger.service.warning("MemoryConsolidator: decay step failed: \(error)")
         }
 
-        let mergedCount = mergeNearDuplicateEpisodes(threshold: config.episodeMergeCosineThreshold)
         let promotedCount = promotePinnedCandidates()
 
         var evictedCount = 0
@@ -282,9 +307,10 @@ public actor MemoryConsolidator {
 
         let durationMs = Int(Date().timeIntervalSince(started) * 1000)
         let details =
-            "merged=\(mergedCount) promoted=\(promotedCount) evicted=\(evictedCount) "
+            "merged=\(mergedEpisodes) mergedPinned=\(mergedPinned) "
+            + "mergedOverrides=\(mergedOverrides) dedupedOverrides=\(dedupedOverrides) "
+            + "promoted=\(promotedCount) evicted=\(evictedCount) "
             + "prunedEpisodes=\(prunedEpisodes) prunedTranscript=\(prunedTurns) "
-            + "identityDuplicates=\(identityDuplicates) "
             + "[merge: \(lastMergeDiagnostics)]"
         do {
             try MemoryDatabase.shared.insertProcessingLog(
@@ -363,6 +389,88 @@ public actor MemoryConsolidator {
         lastMergeDiagnostics =
             "considered=\(embedded.count) embedded=\(embeddedCount) "
             + String(format: "bestSim=%.2f threshold=%.2f", bestSimilarity, threshold)
+        return merged
+    }
+
+    // MARK: - Pinned fact merge
+
+    /// Merge near-duplicate pinned facts (2026-09-07, owner decision: extend
+    /// the episode merge to all three stores). Same-agent facts whose
+    /// similarity is ≥ `threshold` fold into one; the survivor is the
+    /// *stronger* record — higher salience, ties broken toward the older
+    /// entry — and the weaker copy is deleted. Salience is what promotion and
+    /// decay operate on, so keeping the highest-salience copy is the closest
+    /// this store has to "keep the most authoritative wording".
+    ///
+    /// Comparison mirrors the episode merge: cosine over the fact's stored
+    /// embedding when both rows carry one (`loadEmbeddedPinnedFacts`); facts
+    /// distilled before an embedder was configured have no vector and fall
+    /// back to word-shingle overlap. The polarity guard applies on the
+    /// text-only path so a low threshold can't fold "likes X" into "doesn't
+    /// like X"; cosine pairs are inherently safer and are not guarded.
+    private func mergePinnedFacts(threshold: Double) -> Int {
+        let pinned = (try? MemoryDatabase.shared.loadPinnedFacts(agentId: nil, limit: 5000)) ?? []
+        guard pinned.count > 1 else { return 0 }
+        let embedded = (try? MemoryDatabase.shared.loadEmbeddedPinnedFacts(agentId: nil, limit: 5000)) ?? []
+        var vectors: [String: [Float]] = [:]
+        for row in embedded where !row.vector.isEmpty {
+            vectors[row.fact.id] = row.vector
+        }
+
+        func vectorPair(_ a: PinnedFact, _ b: PinnedFact) -> (va: [Float], vb: [Float])? {
+            guard let va = vectors[a.id], let vb = vectors[b.id],
+                va.count == vb.count, !va.isEmpty
+            else { return nil }
+            return (va, vb)
+        }
+        func similarity(_ a: PinnedFact, _ b: PinnedFact) -> Double {
+            if let v = vectorPair(a, b) {
+                return Double(MemorySearchService.cosine(v.va, v.vb))
+            }
+            return TextSimilarity.jaccardTokenized(
+                TextSimilarity.shingleSet(a.content), TextSimilarity.shingleSet(b.content))
+        }
+        func comparedByVector(_ a: PinnedFact, _ b: PinnedFact) -> Bool {
+            vectorPair(a, b) != nil
+        }
+        func olderCreated(_ a: PinnedFact, _ b: PinnedFact) -> PinnedFact {
+            if a.createdAt.isEmpty { return a }
+            if b.createdAt.isEmpty { return b }
+            return a.createdAt <= b.createdAt ? a : b
+        }
+
+        let byAgent = Dictionary(grouping: pinned, by: \.agentId)
+        var merged = 0
+        var consumed = Set<String>()
+
+        for (_, group) in byAgent {
+            guard group.count > 1 else { continue }
+            for i in 0 ..< group.count {
+                let a = group[i]
+                if consumed.contains(a.id) { continue }
+                for j in (i + 1) ..< group.count {
+                    let b = group[j]
+                    if consumed.contains(b.id) { continue }
+                    guard similarity(a, b) >= threshold else { continue }
+                    // Text-only path: never fold a polarity flip into its opposite.
+                    if !comparedByVector(a, b), TextSimilarity.polarityConflict(a.content, b.content) {
+                        continue
+                    }
+                    let keep: PinnedFact =
+                        a.salience != b.salience
+                        ? (a.salience > b.salience ? a : b)
+                        : olderCreated(a, b)
+                    let drop = keep.id == a.id ? b : a
+                    do {
+                        try MemoryDatabase.shared.deletePinnedFact(id: drop.id)
+                        consumed.insert(drop.id)
+                        merged += 1
+                    } catch {
+                        MemoryLogger.service.warning("MemoryConsolidator: pinned merge delete failed: \(error)")
+                    }
+                }
+            }
+        }
         return merged
     }
 

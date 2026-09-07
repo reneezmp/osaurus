@@ -87,6 +87,52 @@ public enum TextSimilarity {
         return out
     }
 
+    /// Words (lowercased alphanumeric runs, untruncated) that flip or negate a
+    /// statement's polarity. Used by `polarityConflict` to stop a fuzzy merge
+    /// from collapsing "likes papaya" into "doesn't like papaya" — at a low
+    /// similarity threshold Jaccard alone cannot tell a paraphrase from a
+    /// correction, so pairs that differ by one of these on a single side are
+    /// treated as non-mergeable. Both the negators and their apostrophe-split
+    /// bases are listed so contracted forms ("doesn't" → "doesn", "t") match.
+    private static let polarityTerms: Set<String> = [
+        "not", "no", "never", "none", "nor", "without", "neither", "barely",
+        "hardly", "cannot", "cant", "won", "wont", "wouldn", "couldn",
+        "shouldn", "don", "doesn", "didn", "isn", "aren", "wasn", "weren",
+        "aint", "dislike", "dislikes", "disliked", "hate", "hates", "hated",
+        "refuse", "refuses", "refused", "avoid", "avoids", "avoided", "deny",
+        "denies", "denied",
+    ]
+
+    /// True when `a` and `b` differ on the polarity side: one of them uses a
+    /// negation/opposition term the other does not. The asymmetric word diff is
+    /// checked — if BOTH sides gained the same polarity word, the meaning is
+    /// unchanged and the pair may still merge. Deliberately conservative:
+    /// false positives only make the merge skip a pair it could have folded.
+    public static func polarityConflict(_ a: String, _ b: String) -> Bool {
+        let tokensA = polarityTokens(a)
+        let tokensB = polarityTokens(b)
+        let onlyA = tokensA.subtracting(tokensB)
+        let onlyB = tokensB.subtracting(tokensA)
+        return !onlyA.isDisjoint(with: polarityTerms) || !onlyB.isDisjoint(with: polarityTerms)
+    }
+
+    private static func polarityTokens(_ text: String) -> Set<String> {
+        var out: Set<String> = []
+        var current = ""
+        for ch in text.lowercased() {
+            if ch.isLetter || ch.isNumber {
+                current.append(ch)
+            } else if !current.isEmpty {
+                out.insert(current)
+                current = ""
+            }
+        }
+        if !current.isEmpty {
+            out.insert(current)
+        }
+        return out
+    }
+
     /// Deterministic UUID v5-ish: SHA-256 of the input, with the version
     /// and variant bits set so VecturaKit accepts it as a real UUID. Used
     /// to map composite keys (`"episode:42"`, `"transcript:conv-1:7"`,

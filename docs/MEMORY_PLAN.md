@@ -450,3 +450,61 @@ blocking.
   gate until that suite is re-enabled.
 - Fresh Rosy deploy zip built and round-trip verified (symlinks + signature
   intact after unzip).
+
+---
+
+# Test results — 2026-09-07, merge-all-stores build (on top of `2eb5b8ac`) on Rosy
+
+Feature round following the D-fix follow-up. Owner confirmed **everything is
+working** after exercising the new merge semantics and the override editor on
+Rosy.
+
+## New in this build
+
+### Near-duplicate merging now covers all three stores — and runs FIRST
+Previously only episodes merged. Owner decision (2026-09-07): identity
+overrides and pinned facts get the same "keep the strongest twin, retire the
+echo" treatment, run before decay / promotion / eviction / pruning on one
+threshold — the existing **Merge threshold** slider (Settings copy updated;
+default unchanged at 0.9).
+
+- **Identity overrides** — `MemoryDatabase.mergeSimilarIdentityOverrides`:
+  the safe exact-normalized dedup runs first, then word-overlap folding.
+  The longer, more specific wording survives. Polarity-conflicting pairs are
+  never merged (`TextSimilarity.polarityConflict`), so a correction or
+  negation can't be folded into its opposite. Runs transactionally.
+- **Pinned facts** — `MemoryConsolidator.mergePinnedFacts`: cosine over each
+  row's stored embedding, word-overlap fallback for facts with no vector
+  (distilled before an embedder was configured). Same agent only; the
+  higher-salience copy survives (ties → older). Deleting the row removes its
+  vector column with it — no orphaned index to clean.
+- **Episodes** — existing cosine merge unchanged, re-ordered into the same
+  leading phase.
+- Pass diagnostics/log now report `merged=… mergedPinned=…
+  mergedOverrides=… dedupedOverrides=…`.
+
+### Identity overrides are editable
+Each override row gained a pencil action (on hover) that opens a pre-filled
+**Edit Override** sheet; save writes through the transactional
+`MemoryDatabase.replaceIdentityOverride` (targeted by the original displayed
+text, so a concurrent consolidation pass can't shift rows under the edit).
+Editing needs no re-embedding — identity overrides are plain strings injected
+verbatim and are never stored as vectors.
+
+## Superseded notes
+
+- D6's earlier "broader semantic overlaps remain open … no fuzzy threshold or
+  model-based cleanup is introduced" is superseded by the owner decision
+  above. The polarity guard is what makes fuzzy override merging safe.
+- The 2026-09-07 merge-threshold section above ("episodes") is broadened:
+  the knob now governs every store.
+
+## Validation for this round
+
+- `swift build` (package) — passed.
+- `swift test --no-parallel` — **707 tests / 104 suites passed** (one run hit
+  a timing flake; a clean rerun passed without code changes).
+- `scripts/build/build_rosy.sh` (Debug x86_64, canonical `~/.osaurus`, stable
+  signing identity) — passed; `codesign --verify --deep --strict` passed.
+- `git diff --check` — passed.
+- Owner on Rosy: **"everything is working."**

@@ -92,16 +92,26 @@ public struct MemoryConfiguration: Codable, Equatable, Sendable {
     /// by the consolidator. Set to 0 to keep forever.
     public var episodeRetentionDays: Int
 
-    /// Cosine similarity above which the consolidator treats two episodes
-    /// of the same agent as near-duplicates and merges them (keeping the
-    /// older). Higher = only merge when near-identical (fewer merges);
-    /// lower = merge more eagerly (fewer near-duplicate episodes kept).
+    /// Similarity above which consolidation merges two stored entries as
+    /// near-duplicates. Higher = only merge when near-identical (fewer
+    /// merges); lower = merge more eagerly.
     ///
-    /// Previously an internal constant (`0.9`). Made user-configurable on
-    /// 2026-09-07 at the owner's request after a Rosy test round found the
-    /// fixed 0.9 too strict — real conversations left too many near-duplicate
-    /// episodes unmerged. Default intentionally unchanged (0.9) so existing
-    /// behavior is preserved until an owner lowers it.
+    /// Applies to all three stores, merged in one phase before the other
+    /// consolidation steps (owner decision 2026-09-07):
+    ///   - **Episodes** and **pinned facts** — compared by cosine over their
+    ///     stored embeddings (pinned facts fall back to word-overlap when a
+    ///     vector is missing). The survivor keeps its higher-salience copy.
+    ///   - **Identity overrides** — compared by word-overlap (they have no
+    ///     vectors); the longer wording survives, and polarity-conflicting
+    ///     pairs are never merged.
+    ///
+    /// The property name (and persisted JSON key) retains "Episode" from when
+    /// it was an episodes-only constant; renaming would silently reset a saved
+    /// value on disk, so the historical name is kept. The Memory → Settings
+    /// slider ("Merge threshold") is the single control for all three.
+    ///
+    /// Default intentionally unchanged (0.9) so existing behavior is preserved
+    /// until an owner lowers it.
     public var episodeMergeCosineThreshold: Double
 
     /// Per-agent opt-in for **distillation** — the cloud call in
