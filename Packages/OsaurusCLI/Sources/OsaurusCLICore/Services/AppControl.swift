@@ -34,10 +34,23 @@ public struct AppControl {
             openByBundle.waitUntilExit()
             launched = (openByBundle.terminationStatus == 0)
         }
-        // Even if `open -b` returned success, do a quick health-based fallback attempt
-        // in case LaunchServices couldn't resolve the bundle id for some setups.
-        let healthyAfterBundle = await ServerControl.checkHealth(port: port)
-        if !launched || !healthyAfterBundle {
+        // LaunchServices can report success before the app process exists, while
+        // the server is still warming. Health is therefore not a valid launch
+        // check here: a cold start would always trigger the fallback and reopen
+        // the app window. Wait briefly for the process itself instead.
+        var appIsRunning = false
+        if launched {
+            for _ in 0..<20 {
+                if !NSRunningApplication.runningApplications(
+                    withBundleIdentifier: "com.dinoki.osaurus"
+                ).isEmpty {
+                    appIsRunning = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        if !launched || !appIsRunning {
             if let appPath = findAppBundlePath() {
                 let openByPath = Process()
                 openByPath.executableURL = URL(fileURLWithPath: "/usr/bin/open")

@@ -1090,8 +1090,36 @@ public final class ChatWindowManager: NSObject, ObservableObject, NSWindowDelega
             }
         guard let targetId, let state = windowStates[targetId] else { return false }
         showWindow(id: targetId)
-        state.startNewChat()
+        state.startNewChatInCurrentProject()
         return true
+    }
+
+    private var shortcutTargetState: ChatWindowState? {
+        if let keyID = nsWindows.first(where: { $0.value.isKeyWindow })?.key {
+            return windowStates[keyID]
+        }
+        if let lastID = lastFocusedWindowId, let window = nsWindows[lastID], window.isVisible {
+            return windowStates[lastID]
+        }
+        return nil
+    }
+
+    /// ⌘B mirrors the toolbar sidebar button for the focused visible window.
+    public func toggleSidebarInFocusedWindow() {
+        guard let state = shortcutTargetState else { return }
+        withAnimation(state.theme.animationQuick()) { state.showSidebar.toggle() }
+    }
+
+    /// ⇧⌘. selects the next local agent, but leaves a project route alone.
+    public func cycleAgentInFocusedWindow() {
+        guard let state = shortcutTargetState,
+              !state.isProjectPageVisible,
+              state.selectedDiscoveredAgent == nil,
+              state.selectedRelayAgent == nil,
+              state.agents.count > 1,
+              let index = state.agents.firstIndex(where: { $0.id == state.agentId })
+        else { return }
+        state.switchAgent(to: state.agents[(index + 1) % state.agents.count].id)
     }
 
     /// Bring a window (and the app) reliably to the front from anywhere —
@@ -1414,7 +1442,7 @@ private struct IntelToolbarActionView: View {
                     HeaderActionButton(
                         icon: "plus",
                         help: "New chat",
-                        action: { windowState.startNewChat() }
+                        action: { windowState.startNewChatInCurrentProject() }
                     )
                 }
             }

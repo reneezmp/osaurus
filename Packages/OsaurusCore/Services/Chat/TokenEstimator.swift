@@ -52,13 +52,20 @@ public enum TokenEstimator {
     /// 1-char strings don't silently round to zero tokens.
     public static func estimate(_ text: String?) -> Int {
         guard let text, !text.isEmpty else { return 0 }
-        return max(1, text.count / charsPerToken)
+        // UTF-8 length is cached by native strings, while grapheme counting
+        // walks the whole value. This estimator runs repeatedly over complete
+        // transcripts during layout, so the byte-based proxy avoids an O(n)
+        // main-thread scan and better reflects dense-script tokenization.
+        return max(1, text.utf8.count / charsPerToken)
     }
 
     /// Estimate tokens for a single tool-call envelope. `id` defaults to
     /// "" because some callers (streaming deltas) only have the function
     /// name + arguments and not the synthetic call id.
     public static func toolCallTokens(name: String, arguments: String, id: String = "") -> Int {
-        max(1, (name.count + arguments.count + id.count + toolCallEnvelopeChars) / charsPerToken)
+        max(
+            1,
+            (name.utf8.count + arguments.utf8.count + id.utf8.count + toolCallEnvelopeChars)
+                / charsPerToken)
     }
 }

@@ -44,6 +44,7 @@ struct osaurusApp: SwiftUI.App {
         .commands {
             aboutCommand
             fileMenuCommands
+            chatShortcutCommands
             viewMenuCommands
             settingsCommand
         }
@@ -104,6 +105,24 @@ private extension osaurusApp {
                 "n",
                 modifiers: cmdNStartsNewChatInCurrentWindow ? [.command, .shift] : .command
             )
+        }
+    }
+
+    var chatShortcutCommands: some Commands {
+        CommandGroup(after: .sidebar) {
+            Button {
+                Task { @MainActor in ChatWindowManager.shared.toggleSidebarInFocusedWindow() }
+            } label: {
+                Text(verbatim: L("Toggle Sidebar"))
+            }
+            .keyboardShortcut("b", modifiers: .command)
+
+            Button {
+                Task { @MainActor in ChatWindowManager.shared.cycleAgentInFocusedWindow() }
+            } label: {
+                Text(verbatim: L("Next Agent"))
+            }
+            .keyboardShortcut(".", modifiers: [.command, .shift])
         }
     }
 

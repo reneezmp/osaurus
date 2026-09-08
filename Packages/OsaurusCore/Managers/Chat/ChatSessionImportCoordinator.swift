@@ -160,6 +160,8 @@ enum ChatSessionImportCoordinator {
             let outcome: ParseOutcome =
                 await Task.detached(priority: .userInitiated) {
                     var outcome = ParseOutcome()
+                    var claudeIndexFiles: [String] = []
+                    var claudeIndexError: Error?
                     for url in urls {
                         onProgress(L("Reading \(url.lastPathComponent)…"))
                         do {
@@ -168,10 +170,24 @@ enum ChatSessionImportCoordinator {
                                 data: data, onProgress: onProgress)
                             outcome.conversations.append(contentsOf: result.conversations)
                             outcome.unreadable += result.unreadable
+                        } catch let error as ChatSessionImporter.ImportError
+                            where error.isClaudeExportIndex
+                        {
+                            claudeIndexFiles.append(url.lastPathComponent)
+                            if claudeIndexError == nil { claudeIndexError = error }
                         } catch {
                             outcome.failedFiles.append(url.lastPathComponent)
                             if outcome.firstError == nil { outcome.firstError = error }
                         }
+                    }
+                    // Selecting the manifest together with its batch ZIPs is
+                    // normal. It becomes an error only when no batch supplied
+                    // importable conversations.
+                    if Self.shouldReportClaudeExportIndexes(
+                        importedConversationCount: outcome.conversations.count
+                    ) {
+                        outcome.failedFiles.append(contentsOf: claudeIndexFiles)
+                        if outcome.firstError == nil { outcome.firstError = claudeIndexError }
                     }
                     return outcome
                 }.value
@@ -203,6 +219,12 @@ enum ChatSessionImportCoordinator {
                 }
             }
         }
+    }
+
+    /// Kept pure for regression coverage: a Claude index is informational
+    /// alongside successful batches, but actionable when selected alone.
+    nonisolated static func shouldReportClaudeExportIndexes(importedConversationCount: Int) -> Bool {
+        importedConversationCount == 0
     }
 
     // MARK: - Persistence

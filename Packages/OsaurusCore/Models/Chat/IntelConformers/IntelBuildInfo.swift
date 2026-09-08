@@ -50,10 +50,10 @@ public enum OsaurusBuildInfo {
 #if OSAURUS_INTEL
 enum IntelBuildInfo {
     /// The upstream Osaurus version era this build is synced to (display only).
-    static let upstreamBase = "0.20.3"
+    static let upstreamBase = "0.24.7"
 
     /// The exact upstream commit last synced (short hash) — matches the
     /// "Last synced upstream commit" line in `docs/UPSTREAM_SYNC.md`.
-    static let upstreamCommit = "9124d696"
+    static let upstreamCommit = "7e109ade"
 }
 #endif

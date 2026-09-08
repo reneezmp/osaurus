@@ -15,14 +15,20 @@ import Foundation
 
 enum SystemPermissionProbe {
     struct FullDiskResource: Sendable {
-        let relativePath: String
+        enum Location: Sendable { case system, home }
+        let location: Location
+        let path: String
+        func url(homeDirectory: URL) -> URL {
+            switch location {
+            case .system: return URL(fileURLWithPath: path)
+            case .home: return homeDirectory.appendingPathComponent(path)
+            }
+        }
     }
 
     static let defaultFullDiskResources: [FullDiskResource] = [
-        .init(relativePath: "Library/Application Support/com.apple.TCC/TCC.db"),
-        .init(relativePath: "Library/Messages/chat.db"),
-        .init(relativePath: "Library/Safari/Bookmarks.plist"),
-        .init(relativePath: "Library/Safari/CloudTabs.db"),
+        .init(location: .system, path: "/Library/Application Support/com.apple.TCC/TCC.db"),
+        .init(location: .home, path: "Library/Messages/chat.db"),
     ]
 
     static func fullDiskAccessGranted(
@@ -30,12 +36,10 @@ enum SystemPermissionProbe {
         fileManager: FileManager = .default,
         resources: [FullDiskResource] = defaultFullDiskResources
     ) -> Bool {
-        resources.contains { resource in
-            canReadProtectedFile(
-                homeDirectory.appendingPathComponent(resource.relativePath),
-                fileManager: fileManager
-            )
-        }
+        let existing = resources.map { $0.url(homeDirectory: homeDirectory) }
+            .filter { isRegularFile($0, fileManager: fileManager) }
+        guard !existing.isEmpty else { return false }
+        return existing.allSatisfy { canReadProtectedFile($0, fileManager: fileManager) }
     }
 
     static func screenRecordingGranted(
@@ -52,11 +56,19 @@ enum SystemPermissionProbe {
 
         do {
             let handle = try FileHandle(forReadingFrom: url)
-            try handle.close()
-            return true
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: Self.sqliteHeader.count)
+            return data == Self.sqliteHeader
         } catch {
             return false
         }
+    }
+
+    private static let sqliteHeader = Data("SQLite format 3\u{0}".utf8)
+    private static func isRegularFile(_ url: URL, fileManager: FileManager) -> Bool {
+        var isDirectory: ObjCBool = false
+        return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && !isDirectory.boolValue
     }
 }
 

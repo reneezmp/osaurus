@@ -2357,6 +2357,12 @@ extension FloatingInputCard {
             }
             .buttonStyle(.plain)
             .help(hasFolder ? Text(localized: "Change working folder") : Text(localized: "Select a working folder"))
+            // The selected-folder name is decorative in the chip, so expose a
+            // stable name, value, and identifier to VoiceOver and UI tests.
+            .accessibilityLabel(Text("Folder", bundle: .module))
+            .accessibilityValue(Text(verbatim: hasFolder
+                ? (folderContextService.currentContext?.rootPath.lastPathComponent ?? "") : ""))
+            .accessibilityIdentifier("composer.folderChip")
             .contextMenu {
                 if hasFolder {
                     Button {

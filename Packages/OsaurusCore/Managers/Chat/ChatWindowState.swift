@@ -725,9 +725,52 @@ final class ChatWindowState: ObservableObject {
         session.reset()
         refreshSessions()
     }
+
+    /// Keep ⌘N in the open project, or in the current session's project.
+    /// Intel has no per-chat folder state, so the upstream project-folder
+    /// default cannot be applied here without overwriting global folder
+    /// context; that slice is deliberately deferred.
+    func startNewChatInCurrentProject() {
+        let projectID = openProjectId ?? session.projectId
+        guard let project = ProjectManager.shared.project(for: projectID) else {
+            openProjectId = nil
+            startNewChat()
+            return
+        }
+        startNewChat(in: project)
+    }
+
+    func startNewChat(in project: Project) {
+        openProjectId = nil
+        if let defaultAgentID = project.defaultAgentId,
+           defaultAgentID != agentId,
+           agents.contains(where: { $0.id == defaultAgentID })
+        {
+            switchAgent(to: defaultAgentID)
+        } else {
+            startNewChat()
+        }
+        session.projectId = project.id
+    }
+
+    var isProjectPageVisible: Bool { openProjectId != nil }
     func loadSession(_ sessionData: ChatSessionData) {
-        session.load(from: sessionData)
+        // Some UI surfaces may hand us a metadata-only row. Resolve the full
+        // Intel session from its durable manager before loading so a later
+        // incremental save cannot replace a stored transcript with an empty
+        // snapshot (upstream 9af6f53d).
+        let resolved = Self.resolvedSessionData(
+            sessionData,
+            stored: ChatSessionsManager.shared.session(for: sessionData.id)
+        )
+        session.load(from: resolved)
         refreshSessions()
+    }
+
+    static func resolvedSessionData(
+        _ candidate: ChatSessionData, stored: ChatSessionData?
+    ) -> ChatSessionData {
+        candidate.turns.isEmpty ? (stored ?? candidate) : candidate
     }
     func refreshSessions() {
         filteredSessions = ChatSessionsManager.shared.sessions(for: agentId)

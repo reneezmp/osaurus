@@ -3,14 +3,44 @@
 **Base commit:** `d0782cbb` (Pin vMLX main runtime and harden server boundaries, #1201)  
 **Intel fork:** `github.com/reneezmp/osaurus-intel` (`intel-fork`)  
 **Upstream:** `github.com/osaurus-ai/osaurus` (`main`)  
-**Last synced upstream commit:** `9124d696` (share artifact tool fix, #1561)  
-**Upstream version era:** `0.20.3` (HEAD is `0.20.3-15-g9124d696`; no newer tag yet)  
-**Last sync date:** 2026-06-17  
-**Status:** 🔴 **783 commits behind** as of 2026-09-02. Upstream is now `0.24.3-17-g4528b56f`. Full triage done — see *Pending next sync* below. Intel releases: 1.0.20 (cache + Ventura layout), 1.0.21 (0.19.15→0.20.0 absorb), 1.0.22 (deferred-shelf incl. hosted inference — untested live), 1.0.23 (0.20.0→0.20.3 sync), 1.0.24 (global-proxy batch), … 1.0.31 (current).  
+**Last synced upstream commit:** `7e109ade` (cold-load retry ownership, #2668)
+**Upstream version era:** `0.24.7` (`0.24.7-24-g7e109ade`)
+**Last sync date:** 2026-09-07
+**Status:** 🟢 **Current through `7e109ade`**. All 53 commits after the 0.24.3 sync point were classified; applicable Intel slices are ported and incompatible/coupled work is explicitly deferred or skipped. Intel releases: 1.0.20 (cache + Ventura layout), 1.0.21 (0.19.15→0.20.0 absorb), 1.0.22 (deferred shelf), 1.0.23 (0.20.0→0.20.3 sync), 1.0.24 (global proxy batch), … 1.0.34 (Projects).
 
 ---
 
-## Pending next sync: 0.20.3 → 0.24.3 (triaged 2026-09-02, Session 11)
+## Sync 0.24.3 → 0.24.7 (2026-09-07)
+
+**Range:** `4528b56f..7e109ade` — **53 commits**. Deterministic exclusion triage produced
+33 review candidates, 8 new-subsystem-only commits, 5 infrastructure-only commits,
+5 release/docs-only commits, and 2 excluded-only commits. The 33 survivors were read
+individually; the complete ledger is
+[`UPSTREAM_TRIAGE_0.24.7.md`](UPSTREAM_TRIAGE_0.24.7.md).
+
+**Ported:** the Full Disk Access system-TCC/SQLite-header probe pair; Claude split-export
+index and batch-ZIP import guidance; project-aware New Chat; ⌘B sidebar and next-agent
+shortcuts; folder-chip accessibility; metadata-only session hydration; UTF-8 token
+estimation; and the lock-backed tool-configuration quit drain. The CLI launch fallback
+also now waits for the application process instead of mistaking cold server startup for
+a failed launch.
+
+**Deferred deliberately:** project folders need per-chat folder ownership before they can
+be safe on Intel; clickable Knowledge links and Knowledge paging wait for the local-first
+Knowledge milestone; the browser-tab/history shell is a larger reconciliation with the
+Intel Projects and toolbar structure. Local vMLX/MTP, local-model residency, upstream
+agent-loop/delegation, sandbox, skill mutation, and upstream appcast changes remain skips.
+
+As in the previous sync, every useful change was hand-ported. No upstream commit was
+cherry-picked wholesale.
+
+**Validation:** `swift test --no-parallel` passed **715 tests in 107 suites**;
+`swift build --arch x86_64` passed; and the unsigned x86_64 workspace build passed
+with deployment target macOS 13.
+
+---
+
+## Completed sync: 0.20.3 → 0.24.3 (triaged 2026-09-02, implemented 2026-09-02/03)
 
 **Range:** `9124d696..4528b56f` — **783 commits**, upstream `0.20.3` → `0.24.3` (+17 untagged).
 **Status: Waves A–E are ported and committed on `sync/0.24.3` / `intel-fork`; nothing is released

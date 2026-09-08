@@ -232,9 +232,7 @@ struct ChatContentView: View {
                             },
                             onNewChat: { [weak windowState] in
                                 guard let windowState else { return }
-                                windowState.startNewChat()
-                                windowState.session.projectId = openProjectId
-                                windowState.openProjectId = nil
+                                windowState.startNewChatInCurrentProject()
                             },
                             onLeave: { [weak windowState] in
                                 windowState?.openProjectId = nil

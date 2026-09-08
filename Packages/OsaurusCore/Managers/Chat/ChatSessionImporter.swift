@@ -50,7 +50,16 @@ public enum ChatSessionImporter {
     public enum ImportError: LocalizedError {
         case invalidJSON
         case unrecognizedFormat
+        /// Claude's split export index lists batch ZIPs but contains no
+        /// conversations itself. It needs a useful diagnosis rather than the
+        /// generic unsupported-format error.
+        case claudeExportIndex(files: [String])
         case noConversations
+
+        public var isClaudeExportIndex: Bool {
+            if case .claudeExportIndex = self { return true }
+            return false
+        }
 
         public var errorDescription: String? {
             switch self {
@@ -60,6 +69,15 @@ public enum ChatSessionImporter {
                 return L(
                     "Unrecognized export format. Supported: ChatGPT conversations.json, Claude export JSON, Grok account export, Gemini Takeout MyActivity.json, Open WebUI chat export, or Osaurus generic import JSON."
                 )
+            case .claudeExportIndex(let files):
+                var message = L(
+                    "This file is the index of a Claude export, not the conversations. Claude splits large exports into batch ZIP files and lists them here. Import each batch ZIP directly; there is no need to unzip it. If you only received this file, download each link under export_url first."
+                )
+                if !files.isEmpty {
+                    message += "\n\n" + L("Batch files listed in the index:") + "\n"
+                        + files.map { "• \($0)" }.joined(separator: "\n")
+                }
+                return message
             case .noConversations:
                 return L("No importable conversations were found in the file.")
             }
@@ -102,7 +120,9 @@ public enum ChatSessionImporter {
                 throw ImportError.unrecognizedFormat
             }
         } else if let object = root as? [String: Any] {
-            if object["mapping"] is [String: Any] {
+            if let files = claudeExportIndexFiles(object) {
+                throw ImportError.claudeExportIndex(files: files)
+            } else if object["mapping"] is [String: Any] {
                 result = collect([object], parseChatGPT, chatGPTHasUserContent)
             } else if object["chat_messages"] is [Any] {
                 result = collect([object], parseClaude, claudeHasUserContent)
@@ -305,6 +325,20 @@ public enum ChatSessionImporter {
     }
 
     // MARK: - Claude (data export)
+
+    /// Claude can split an export into downloadable batches and place this
+    /// manifest beside them. Requiring an actual `export_url` keeps ordinary
+    /// user JSON with an unrelated `data_files` key on the generic path.
+    private static func claudeExportIndexFiles(_ object: [String: Any]) -> [String]? {
+        guard let entries = object["data_files"] as? [[String: Any]],
+              entries.contains(where: { $0["export_url"] != nil })
+        else { return nil }
+        return entries.compactMap { entry in
+            if let filename = entry["filename"] as? String { return filename }
+            guard let rawURL = entry["export_url"] as? String else { return nil }
+            return URL(string: rawURL)?.lastPathComponent
+        }
+    }
 
     /// Claude's data export is an array of conversations with flat
     /// `chat_messages`, `sender` being `human` or `assistant`.
