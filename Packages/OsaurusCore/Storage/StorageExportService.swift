@@ -103,13 +103,13 @@ public actor StorageExportService {
             OsaurusPaths.toolSpecs(),
         ]
         for root in osecRoots {
-            summary.jsonFilesDecrypted += decryptOSecTree(under: root, key: key, into: destination)
+            summary.jsonFilesDecrypted += exportArtifactTree(under: root, key: key, into: destination)
         }
 
         // 3. Blobs — decrypt content-addressed attachments.
         let blobsDir = AttachmentBlobStore.blobsDir()
         if fm.fileExists(atPath: blobsDir.path) {
-            summary.blobsDecrypted = decryptBlobsDir(blobsDir, key: key, into: destination)
+            summary.blobsDecrypted = exportBlobsDir(blobsDir, key: key, into: destination)
         }
 
         // 4. Metadata stamp so the user knows what they have.
@@ -301,10 +301,13 @@ public actor StorageExportService {
         let fm = FileManager.default
         guard fm.fileExists(atPath: target.path) else { return .success(()) }
 
-        let outPath =
-            destination
-            .appendingPathComponent("databases", isDirectory: true)
-            .appendingPathComponent(URL(fileURLWithPath: target.path).lastPathComponent + ".plaintext")
+        // Mirror the path relative to `~/.osaurus` rather than using the bare
+        // filename: every per-agent DB is `agents/<UUID>/db.sqlite` and every
+        // plugin DB is `Tools/<id>/data/data.db`, so a flat
+        // `databases/<basename>.plaintext` layout made all of them collide on
+        // one file and the export silently kept only the last one written.
+        let outPath = Self.databaseExportURL(
+            for: target.path, root: OsaurusPaths.root(), destination: destination)
         do {
             try fm.createDirectory(at: outPath.deletingLastPathComponent(), withIntermediateDirectories: true)
         } catch {
@@ -378,7 +381,22 @@ public actor StorageExportService {
 
     // MARK: - Internals: file trees
 
-    private func decryptOSecTree(under url: URL, key: SymmetricKey, into destination: URL) -> Int {
+    /// Copy one artifact root into the backup, decrypting `.osec` envelopes on
+    /// the way through and copying everything else verbatim.
+    ///
+    /// The verbatim half matters more than the decrypting half: JSON at-rest
+    /// encryption was rolled back in storage v2 (`recoverEncryptedJSON` walks
+    /// the tree and restores `.osec` twins to plaintext, and re-enabling it is
+    /// still a follow-up), so a healthy install has **zero** `.osec` files. An
+    /// `.osec`-only walk therefore exported none of the user's agents, themes,
+    /// providers, schedules, watchers or config — the backup the Storage panel
+    /// recommends "before reinstalling macOS or moving Macs" carried nothing
+    /// but databases.
+    ///
+    /// SQLite files are skipped: `exportOneDatabase` already handles every
+    /// database (per-agent `db.sqlite` lives under `agents/`), and copying the
+    /// encrypted file here would put an unreadable database in the backup.
+    private func exportArtifactTree(under url: URL, key: SymmetricKey, into destination: URL) -> Int {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return 0 }
         guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey]) else {
@@ -386,29 +404,65 @@ public actor StorageExportService {
         }
         var count = 0
         for case let f as URL in enumerator {
-            guard f.pathExtension == "osec" else { continue }
-            let plaintext: Data
-            do { plaintext = try EncryptedFileStore.read(f, key: key) } catch { continue }
-            let plain = EncryptedFileStore.plaintextURL(for: f)
+            let isDir = (try? f.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDir { continue }
+            if Self.isDatabaseArtifact(f) { continue }
+
+            let payload: Data
+            let plain: URL
+            if f.pathExtension == "osec" {
+                guard let decrypted = try? EncryptedFileStore.read(f, key: key) else { continue }
+                payload = decrypted
+                plain = EncryptedFileStore.plaintextURL(for: f)
+            } else {
+                guard let raw = try? Data(contentsOf: f) else { continue }
+                payload = raw
+                plain = f
+            }
+
             let relPath = relativePath(from: OsaurusPaths.root(), to: plain) ?? plain.lastPathComponent
             let dest = destination.appendingPathComponent("config", isDirectory: true).appendingPathComponent(relPath)
             try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? plaintext.write(to: dest, options: [.atomic])
+            try? payload.write(to: dest, options: [.atomic])
             count += 1
         }
         return count
     }
 
-    private func decryptBlobsDir(_ url: URL, key: SymmetricKey, into destination: URL) -> Int {
+    /// Files owned by the database half of the export (and their SQLite
+    /// sidecars), which `exportArtifactTree` must leave alone. Internal (not
+    /// private) for direct testing.
+    static func isDatabaseArtifact(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        for ext in ["sqlite", "db"] {
+            if name == ext || name.hasSuffix(".\(ext)") { return true }
+            if name.hasSuffix(".\(ext)-wal") || name.hasSuffix(".\(ext)-shm") { return true }
+            if name.hasSuffix(".\(ext)-journal") { return true }
+        }
+        return false
+    }
+
+    /// Copy the content-addressed attachment blobs. Blobs written through
+    /// `AttachmentBlobStore` carry an `.osec` envelope, but installs that
+    /// predate that convention hold the payload in plaintext under the bare
+    /// hash — an `.osec`-only filter silently dropped every one of those.
+    private func exportBlobsDir(_ url: URL, key: SymmetricKey, into destination: URL) -> Int {
         let fm = FileManager.default
         let outDir = destination.appendingPathComponent("blobs", isDirectory: true)
         try? fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         var count = 0
         let entries = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
-        for entry in entries where entry.pathExtension == "osec" {
-            guard let plaintext = try? EncryptedFileStore.read(entry, key: key) else { continue }
+        for entry in entries {
+            let payload: Data
+            if entry.pathExtension == "osec" {
+                guard let decrypted = try? EncryptedFileStore.read(entry, key: key) else { continue }
+                payload = decrypted
+            } else {
+                guard let raw = try? Data(contentsOf: entry) else { continue }
+                payload = raw
+            }
             let dest = outDir.appendingPathComponent(entry.deletingPathExtension().lastPathComponent)
-            try? plaintext.write(to: dest, options: [.atomic])
+            try? payload.write(to: dest, options: [.atomic])
             count += 1
         }
         return count
@@ -421,6 +475,27 @@ public actor StorageExportService {
             guard let plaintext = try? EncryptedFileStore.read(f, key: oldKey) else { continue }
             try? EncryptedFileStore.write(plaintext, to: f, key: newKey)
         }
+    }
+
+    /// Where one database's plaintext copy lands inside the backup. Internal
+    /// (not private) for direct testing — a flat `databases/<basename>` layout
+    /// is what caused the collision documented at the call site.
+    static func databaseExportURL(for path: String, root: URL, destination: URL) -> URL {
+        let source = URL(fileURLWithPath: path)
+        let rel = staticRelativePath(from: root, to: source) ?? source.lastPathComponent
+        return
+            destination
+            .appendingPathComponent("databases", isDirectory: true)
+            .appendingPathComponent(rel + ".plaintext")
+    }
+
+    static func staticRelativePath(from base: URL, to target: URL) -> String? {
+        let basePath = base.standardizedFileURL.path
+        let targetPath = target.standardizedFileURL.path
+        guard targetPath.hasPrefix(basePath) else { return nil }
+        var rel = String(targetPath.dropFirst(basePath.count))
+        if rel.hasPrefix("/") { rel.removeFirst() }
+        return rel
     }
 
     private func relativePath(from base: URL, to target: URL) -> String? {
