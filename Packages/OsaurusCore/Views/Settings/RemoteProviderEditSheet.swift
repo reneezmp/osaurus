@@ -2064,7 +2064,9 @@ private struct EditProviderFlow: View {
                     authType: authType,
                     providerType: providerType,
                     apiKey: testApiKey,
-                    headers: HeaderEntry.buildHeaders(from: customHeaders)
+                    headers: HeaderEntry.buildHeaders(from: customHeaders),
+                    providerId: (providerType == .openAICodex || authType == .openAICodexOAuth)
+                        ? provider.id : nil
                 )
                 await MainActor.run {
                     testResult = .success(models)

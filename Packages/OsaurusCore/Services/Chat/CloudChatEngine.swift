@@ -87,12 +87,21 @@ private func extractAPIErrorMessage(_ body: String) -> String {
 actor ChatEngine: Sendable, ChatEngineProtocol {
     private let model: String
     private let apiBase: String
+    private let providerOverride: RemoteProvider?
+    private let session: URLSession
+    private let credentials: IntelCodexCredentials
 
     init(
         source: InferenceSource = .httpAPI,
-        model: String = "deepseek-v4-pro"
+        model: String = "deepseek-v4-pro",
+        provider: RemoteProvider? = nil,
+        session: URLSession = .shared,
+        credentials: IntelCodexCredentials = .shared
     ) {
         self.model = model
+        self.providerOverride = provider
+        self.session = session
+        self.credentials = credentials
         self.apiBase = "https://api.deepseek.com/v1/chat/completions"
     }
 
@@ -263,12 +272,14 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
     /// the auth/extra headers to send.
     private struct ResolvedEndpoint {
         let url: String
-        let headers: [String: String]
+        var headers: [String: String]
         let providerLabel: String
         /// When true, the request body must be EIP-191 wallet-signed via
         /// `OsaurusRouterAuthSigner` (the hosted Osaurus Router uses signed
         /// `x-wallet-*` headers instead of a Bearer key).
         var isOsaurusRouter: Bool = false
+        var provider: RemoteProvider? = nil
+        var isCodex: Bool { provider?.providerType == .openAICodex || provider?.authType == .openAICodexOAuth }
     }
 
     /// Resolve the endpoint + headers for `model`. On Intel a request can route
@@ -282,7 +293,13 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
     ///   2. Otherwise the built-in DeepSeek fallback.
     /// Returns nil only when neither a provider endpoint nor a DeepSeek key is
     /// available, so the caller can surface a clear error.
-    private func resolveEndpoint(forModel model: String) async -> ResolvedEndpoint? {
+    private func resolveEndpoint(forModel model: String) async throws -> ResolvedEndpoint? {
+        if let provider = providerOverride {
+            let path = provider.authType == .openAICodexOAuth ? "/codex/responses" : provider.providerType.chatEndpoint
+            guard let url = provider.url(for: path) else { throw EngineError(message: "Invalid provider URL") }
+            return ResolvedEndpoint(url: url.absoluteString, headers: [:], providerLabel: provider.name,
+                                    isOsaurusRouter: provider.providerType == .osaurusRouter, provider: provider)
+        }
         let providerEndpoint: ResolvedEndpoint? = await MainActor.run {
             let manager = RemoteProviderManager.shared
             let providers = manager.configuration.providers.filter { $0.enabled }
@@ -298,26 +315,21 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
             // empty, so the `/v1` must come from `chatEndpoint`. Standard
             // OpenAI-compatible providers still resolve to `/chat/completions`
             // with any `/v1` carried by their own `basePath`.
-            guard let owner, let url = owner.url(for: owner.providerType.chatEndpoint) else { return nil }
+            guard let owner else { return nil }
+            let path = owner.authType == .openAICodexOAuth ? "/codex/responses" : owner.providerType.chatEndpoint
+            guard let url = owner.url(for: path) else { return nil }
 
-            // `resolvedHeaders()` rather than a local switch: it already knows
-            // every auth shape (per-provider API-key header names, the xAI and
-            // ChatGPT/Codex OAuth bearers plus Codex's required
-            // `chatgpt-account-id` / `OpenAI-Beta` / `originator` trio, secret
-            // headers out of the Keychain, OpenRouter attribution). This block
-            // used to hand-roll the API-key half only, so an OAuth provider was
-            // sent no credentials at all and every Codex turn came back
-            // `401 {"detail":"Unauthorized"}`.
-            var headers = owner.resolvedHeaders()
-            if headers["Content-Type"] == nil { headers["Content-Type"] = "application/json" }
+            // Credential reads happen after leaving MainActor, below.
             return ResolvedEndpoint(
                 url: url.absoluteString,
-                headers: headers,
+                headers: [:],
                 providerLabel: owner.name,
-                isOsaurusRouter: owner.providerType == .osaurusRouter
+                isOsaurusRouter: owner.providerType == .osaurusRouter,
+                provider: owner
             )
         }
-        if let providerEndpoint {
+        if var providerEndpoint {
+            providerEndpoint.headers = try await requestHeaders(for: providerEndpoint)
             NSLog(
                 "[CloudChatEngine] Routing model=\(model) → provider '\(providerEndpoint.providerLabel)' @ \(providerEndpoint.url)"
             )
@@ -332,6 +344,25 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         )
     }
 
+    private func requestHeaders(for endpoint: ResolvedEndpoint) async throws -> [String: String] {
+        guard let provider = endpoint.provider else { return endpoint.headers }
+        if endpoint.isCodex {
+            let tokens = try await credentials.tokens(for: provider.id)
+            var headers = await provider.resolvedHeadersOffMainActor()
+            // Use the refreshed value, not an independently cached token.
+            headers["Authorization"] = "Bearer \(tokens.accessToken)"
+            headers["chatgpt-account-id"] = tokens.accountId
+            headers["OpenAI-Beta"] = "responses=experimental"
+            headers["originator"] = "codex_cli_rs"
+            headers["Accept"] = "text/event-stream"
+            headers["Content-Type"] = "application/json"
+            return headers
+        }
+        var headers = await provider.resolvedHeadersOffMainActor()
+        if headers["Content-Type"] == nil { headers["Content-Type"] = "application/json" }
+        return headers
+    }
+
     func streamChat(request: ChatCompletionRequest) async throws -> AsyncThrowingStream<String, Error> {
         let resolvedModel = request.model ?? model
         if IntelClaudeCodeService.handles(resolvedModel) {
@@ -339,7 +370,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         }
         let toolSpecs = encodeTools(request.tools)
 
-        guard let endpoint = await resolveEndpoint(forModel: resolvedModel) else {
+        guard let endpoint = try await resolveEndpoint(forModel: resolvedModel) else {
             throw EngineError(
                 message:
                     "No endpoint for model \"\(resolvedModel)\". Add a provider (and key, if it needs one) in Settings → Providers, or set the DEEPSEEK_API_KEY env var."
@@ -349,7 +380,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         NSLog("[CloudChatEngine] Starting streamChat — model=\(resolvedModel), via=\(endpoint.providerLabel), messages=\(request.messages.count), tools=\(request.tools?.count ?? 0)")
 
         return AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 do {
                     // Running conversation as wire dicts. We append the
                     // assistant tool-call message + tool-result messages after
@@ -360,30 +391,46 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                     var wireMessages = Self.sanitizeToolSequence(
                         request.messages.map { self.encodeMessage($0) }
                     )
+                    var codexReplayItems: [[String: Any]] = []
                     let maxToolRounds = 12
                     var round = 0
                     var totalChunks = 0
 
                     while round < maxToolRounds {
+                        try Task.checkCancellation()
                         round += 1
 
                         var body: [String: Any] = [
                             "model": resolvedModel,
                             "messages": wireMessages,
                             "stream": true,
-                            // Ask for a final usage chunk so the prompt-cache hit/miss
-                            // split is observable per request (logged in the stream loop).
-                            "stream_options": ["include_usage": true],
                         ]
                         if let toolSpecs {
                             body["tools"] = toolSpecs
                             body["tool_choice"] = "auto"
                         }
-                        self.applyReasoningMode(request, into: &body)
+                        if endpoint.isCodex {
+                            if let effort = request.modelOptions?["reasoningEffort"]?.stringValue?
+                                .trimmingCharacters(in: .whitespacesAndNewlines),
+                                !effort.isEmpty,
+                                !["off", "disabled", "false", "none"].contains(effort.lowercased())
+                            {
+                                body["reasoning_effort"] = effort.lowercased()
+                            }
+                            body = try IntelCodexResponsesAdapter.makeRequest(chatCompletions: body)
+                            var input = body["input"] as? [[String: Any]] ?? []
+                            input.append(contentsOf: codexReplayItems)
+                            body["input"] = input
+                        } else {
+                            // Ask for a final usage chunk so the prompt-cache hit/miss
+                            // split is observable per request (logged below).
+                            body["stream_options"] = ["include_usage": true]
+                            self.applyReasoningMode(request, into: &body)
+                        }
 
                         var urlRequest = URLRequest(url: URL(string: endpoint.url)!)
                         urlRequest.httpMethod = "POST"
-                        for (k, v) in endpoint.headers { urlRequest.setValue(v, forHTTPHeaderField: k) }
+                        for (k, v) in try await self.requestHeaders(for: endpoint) { urlRequest.setValue(v, forHTTPHeaderField: k) }
                         urlRequest.timeoutInterval = 300
                         // CANONICAL (sorted-key) serialization — bare JSONSerialization emits
         // keys in hash order, which differs across app launches (and can differ
@@ -401,7 +448,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                         }
                         NSLog("[CloudChatEngine] Request body: model=\(resolvedModel) round=\(round) tools=\(toolSpecs?.count ?? 0)")
 
-                        let (asyncBytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+                        let (asyncBytes, response) = try await self.session.bytes(for: urlRequest)
                         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
                         NSLog("[CloudChatEngine] HTTP status: \(statusCode)")
                         if !(200...299).contains(statusCode) {
@@ -423,8 +470,92 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                         var partials: [Int: PartialToolCall] = [:]
                         var announcedNames: Set<Int> = []
 
+                        if endpoint.isCodex {
+                            let allowedTools = Set(request.tools?.map { $0.function.name } ?? [])
+                            var decoder = IntelCodexResponsesSSEDecoder(allowedToolNames: allowedTools)
+                            var buffer = Data()
+                            for try await byte in asyncBytes {
+                                try Task.checkCancellation()
+                                buffer.append(byte)
+                                if buffer.count >= 2_048 {
+                                    for emission in try decoder.append(buffer) {
+                                        totalChunks += 1
+                                        continuation.yield(emission)
+                                    }
+                                    buffer.removeAll(keepingCapacity: true)
+                                }
+                            }
+                            if !buffer.isEmpty {
+                                for emission in try decoder.append(buffer) {
+                                    totalChunks += 1
+                                    continuation.yield(emission)
+                                }
+                            }
+                            let finalized = try decoder.finish()
+                            for emission in finalized.emissions {
+                                totalChunks += 1
+                                continuation.yield(emission)
+                            }
+                            if finalized.completion.toolCalls.isEmpty {
+                                NSLog("[CloudChatEngine] Codex stream finished — \(totalChunks) chunks, \(round) round(s)")
+                                continuation.finish()
+                                return
+                            }
+
+                            var results: [IntelCodexResponsesToolResult] = []
+                            for call in finalized.completion.toolCalls {
+                                try Task.checkCancellation()
+                                guard request.tools?.contains(where: { $0.function.name == call.name }) == true else {
+                                    throw EngineError(message: "The provider requested a tool that was not offered: \(call.name)")
+                                }
+                                let policy = ToolRegistry.shared.policyInfo(for: call.name)?.effectivePolicy ?? .auto
+                                let approved: Bool
+                                switch policy {
+                                case .deny: approved = false
+                                case .auto: approved = true
+                                case .ask:
+                                    let description = request.tools?.first(where: { $0.function.name == call.name })?.function.description ?? ""
+                                    approved = await ToolPermissionPromptService.requestApproval(
+                                        toolName: call.name,
+                                        description: description,
+                                        argumentsJSON: call.arguments
+                                    )
+                                }
+                                let result: String
+                                if !approved {
+                                    let reason = policy == .deny
+                                        ? "blocked by your tool permissions (Deny)"
+                                        : "you declined to run it this time"
+                                    result = "⛔️ “\(call.name)” was not run — \(reason)."
+                                } else {
+                                    do {
+                                        result = try await ToolRegistry.shared.execute(
+                                            name: call.name,
+                                            argumentsJSON: call.arguments
+                                        )
+                                    } catch {
+                                        result = ToolEnvelope.fromError(error, tool: call.name)
+                                    }
+                                }
+                                continuation.yield(
+                                    StreamingToolHint.encodeDone(
+                                        callId: call.callID,
+                                        name: call.name,
+                                        arguments: call.arguments,
+                                        result: result
+                                    )
+                                )
+                                results.append(.init(callID: call.callID, output: result))
+                            }
+                            codexReplayItems.append(
+                                contentsOf: try finalized.completion.replayInputItems(toolResults: results)
+                            )
+                            continue
+                        }
+
                         for try await line in asyncBytes.lines {
-                            guard line.hasPrefix("data: "), !Task.isCancelled else { continue }
+                            try Task.checkCancellation()
+                            guard line.hasPrefix("data: ") else { continue }
                             let dataStr = String(line.dropFirst(6))
                             if dataStr == "[DONE]" { break }
 
@@ -528,6 +659,10 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                         // Execute each tool, surface the result card, and feed
                         // the result back as a tool message.
                         for call in orderedCalls {
+                            try Task.checkCancellation()
+                            guard request.tools?.contains(where: { $0.function.name == call.name }) == true else {
+                                throw EngineError(message: "The provider requested a tool that was not offered: \(call.name)")
+                            }
                             let callId = call.id.isEmpty ? "call_\(UUID().uuidString.prefix(20))" : call.id
                             let result: String
                             let toolStart = Date()
@@ -595,12 +730,13 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                     }
 
                     NSLog("[CloudChatEngine] Tool loop hit max rounds (\(maxToolRounds))")
-                    continuation.finish()
+                    continuation.finish(throwing: EngineError(message: "Tool-call limit reached before the response completed."))
                 } catch {
                     NSLog("[CloudChatEngine] Stream error: \(error.localizedDescription)")
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
 
@@ -609,16 +745,41 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         if IntelClaudeCodeService.handles(resolvedModel) {
             return try await IntelClaudeCodeService.shared.completeChat(request: request)
         }
-        guard let endpoint = await resolveEndpoint(forModel: resolvedModel) else {
+        guard let endpoint = try await resolveEndpoint(forModel: resolvedModel) else {
             throw EngineError(
                 message:
                     "No endpoint for model \"\(resolvedModel)\". Add a provider (and key, if it needs one) in Settings → Providers, or set the DEEPSEEK_API_KEY env var."
             )
         }
 
+        if endpoint.isCodex {
+            let stream = try await streamChat(request: request)
+            var content = ""
+            for try await delta in stream where !StreamingToolHint.isSentinel(delta) {
+                content += delta
+            }
+            return ChatCompletionResponse(
+                id: "codex-\(UUID().uuidString)",
+                object: "chat.completion",
+                created: Int(Date().timeIntervalSince1970),
+                model: resolvedModel,
+                choices: [
+                    .init(
+                        index: 0,
+                        message: .init(
+                            role: "assistant", content: content,
+                            tool_calls: nil, reasoning_content: nil
+                        ),
+                        finish_reason: "stop"
+                    )
+                ],
+                usage: nil
+            )
+        }
+
         var urlRequest = URLRequest(url: URL(string: endpoint.url)!)
         urlRequest.httpMethod = "POST"
-        for (k, v) in endpoint.headers { urlRequest.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in try await requestHeaders(for: endpoint) { urlRequest.setValue(v, forHTTPHeaderField: k) }
         urlRequest.timeoutInterval = 300
 
         var body: [String: Any] = [
@@ -653,7 +814,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
             try await OsaurusRouterAuthSigner().sign(request: &urlRequest, body: urlRequest.httpBody)
         }
 
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let (data, response) = try await session.data(for: urlRequest)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         if !(200...299).contains(statusCode) {
             let message = extractAPIErrorMessage(String(data: data, encoding: .utf8) ?? "")

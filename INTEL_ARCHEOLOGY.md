@@ -66,6 +66,28 @@ Full end-to-end dylib loading + tool invocation testing is deferred until the fu
 
 ---
 
+## M19 — ChatGPT/Codex OAuth reached the real protocol (2026-09-08)
+
+OAuth login and live model discovery could succeed while every generated turn
+failed. The Intel `CloudChatEngine` was posting a Chat Completions `messages`
+body to `/backend-api/codex/responses` and parsing only `choices[].delta`. The
+endpoint and headers were finally right; the wire language was not.
+
+Intel now has a focused Responses bridge: request conversion, typed SSE parsing,
+explicit failed/incomplete-stream errors, tool calls, and encrypted-reasoning
+replay across tool rounds. A shared credential actor refreshes expired OAuth
+tokens once for concurrent discovery/Test/inference callers. Provider Test uses
+the saved provider id and the live catalog, so static fallback models can no
+longer turn a broken sign-in into a green result. Ordinary OpenAI-compatible and
+DeepSeek paths remain on Chat Completions.
+
+The decisive lesson is familiar by now: a compiled UI and a successful OAuth
+callback prove only that the front door opens. On Rosy, we follow the request all
+the way to its terminal stream event. See `docs/INTEL_CODEX_OAUTH.md` for the wire
+contract and verification boundary.
+
+---
+
 ## Marathon Session 2026-05-23 → 2026-05-24
 
 **Agent:** Sunny (DeepSeek-V4-Pro via OpenCode)  

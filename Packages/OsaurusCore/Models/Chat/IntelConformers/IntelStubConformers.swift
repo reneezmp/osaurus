@@ -307,7 +307,7 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
     /// response (the OpenAI-compatible `data[]` shape only — the `models[]`
     /// fallback branch doesn't carry these vendor keys upstream either, so
     /// it returns an empty context-length map).
-    private func probeModelsDiscovery(for provider: RemoteProvider) async -> (
+    private func probeModelsDiscovery(for provider: RemoteProvider) async throws -> (
         models: [String], contextLengths: [String: Int]
     ) {
         // OAuth providers don't answer a plain `/models` GET, so resolve their
@@ -317,7 +317,7 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
         // showed its models during sign-in and then an empty picker forever
         // after — the probe was GETting `chatgpt.com/backend-api/models`
         // unauthenticated and swallowing the non-2xx.
-        if let catalog = await Self.oauthModelCatalog(
+        if let catalog = try await Self.oauthModelCatalog(
             providerType: provider.providerType,
             authType: provider.authType,
             providerId: provider.id
@@ -389,15 +389,24 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
         guard let provider = configuration.providers.first(where: { $0.id == providerId }),
             provider.enabled
         else { return }
-        let (models, contextLengths) = await probeModelsDiscovery(for: provider)
-        var state = providerStates[providerId] ?? RemoteProviderState(providerId: providerId)
-        state.isConnected = true
-        state.discoveredModels = models
-        state.lastConnectedAt = Date()
-        providerStates[providerId] = state
-        customProviderContextLengths[providerId] = contextLengths
-        NSLog("[RemoteProviderManager] \(provider.name): discovered \(models.count) model(s) → \(models)")
-        notifyModelsChanged()
+        do {
+            let (models, contextLengths) = try await probeModelsDiscovery(for: provider)
+            var state = providerStates[providerId] ?? RemoteProviderState(providerId: providerId)
+            state.isConnected = true
+            state.lastError = nil
+            state.discoveredModels = models
+            state.lastConnectedAt = Date()
+            providerStates[providerId] = state
+            customProviderContextLengths[providerId] = contextLengths
+            NSLog("[RemoteProviderManager] \(provider.name): discovered \(models.count) model(s) → \(models)")
+            notifyModelsChanged()
+        } catch {
+            var state = providerStates[providerId] ?? RemoteProviderState(providerId: providerId)
+            state.isConnected = false
+            state.lastError = error.localizedDescription
+            providerStates[providerId] = state
+            notifyModelsChanged()
+        }
     }
 
     /// Probe every enabled provider. Called at launch, when the Providers tab
@@ -417,14 +426,22 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
                 await connectOsaurusRouterIfPossible()
                 continue
             }
-            let (models, contextLengths) = await probeModelsDiscovery(for: provider)
-            var state = providerStates[provider.id] ?? RemoteProviderState(providerId: provider.id)
-            state.isConnected = true
-            state.discoveredModels = models
-            state.lastConnectedAt = Date()
-            providerStates[provider.id] = state
-            customProviderContextLengths[provider.id] = contextLengths
-            NSLog("[RemoteProviderManager] \(provider.name): discovered \(models.count) model(s) → \(models)")
+            do {
+                let (models, contextLengths) = try await probeModelsDiscovery(for: provider)
+                var state = providerStates[provider.id] ?? RemoteProviderState(providerId: provider.id)
+                state.isConnected = true
+                state.lastError = nil
+                state.discoveredModels = models
+                state.lastConnectedAt = Date()
+                providerStates[provider.id] = state
+                customProviderContextLengths[provider.id] = contextLengths
+                NSLog("[RemoteProviderManager] \(provider.name): discovered \(models.count) model(s) → \(models)")
+            } catch {
+                var state = providerStates[provider.id] ?? RemoteProviderState(providerId: provider.id)
+                state.isConnected = false
+                state.lastError = error.localizedDescription
+                providerStates[provider.id] = state
+            }
         }
         notifyModelsChanged()
     }
@@ -584,18 +601,21 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
     static func oauthModelCatalog(
         providerType: RemoteProviderType,
         authType: RemoteProviderAuthType,
-        providerId: UUID?
-    ) async -> [String]? {
+        providerId: UUID?,
+        strict: Bool = false
+    ) async throws -> [String]? {
         if providerType == .openAICodex || authType == .openAICodexOAuth {
-            guard let providerId else { return OpenAICodexOAuthService.supportedModels }
-            var tokens = RemoteProviderKeychain.getOAuthTokens(for: providerId)
-            if let current = tokens, current.isExpired,
-                let refreshed = try? await OpenAICodexOAuthService.refresh(current)
-            {
-                await RemoteProviderKeychain.saveOAuthTokensOffMainActor(refreshed, for: providerId)
-                tokens = refreshed
+            guard let providerId else {
+                if strict { throw IntelCodexCredentialsError.missing(providerId: UUID()) }
+                return OpenAICodexOAuthService.supportedModels
             }
-            return await OpenAICodexOAuthService.availableModels(for: tokens)
+            let tokens = try await IntelCodexCredentials.shared.tokens(for: providerId)
+            do {
+                return try await OpenAICodexOAuthService.fetchAvailableModels(tokens: tokens)
+            } catch {
+                if strict { throw error }
+                return OpenAICodexOAuthService.supportedModels
+            }
         }
         if authType == .xaiOAuth {
             return XAIOAuthService.supportedModels
@@ -611,7 +631,8 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
         authType: RemoteProviderAuthType,
         providerType: RemoteProviderType = .openaiLegacy,
         apiKey: String?,
-        headers: [String: String]
+        headers: [String: String],
+        providerId: UUID? = nil
     ) async throws -> [String] {
         // The Osaurus Router rejects a plain unsigned /models probe (its catalog
         // is behind the EIP-191-signed account API), so the generic probe below
@@ -621,15 +642,11 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
             return try await OsaurusRouterAPIClient().models().map(\.id).sorted()
         }
 
-        // Same reasoning as `probeModelsDiscovery`: a `/models` GET against an
-        // OAuth provider fails, so "Test" reported a bare HTTP error for a
-        // perfectly healthy ChatGPT/Codex sign-in. No provider id reaches this
-        // call from every call site, so this resolves the static catalog when
-        // it can't read tokens — which for Codex is the real catalog anyway.
-        if let catalog = await Self.oauthModelCatalog(
+        if let catalog = try await Self.oauthModelCatalog(
             providerType: providerType,
             authType: authType,
-            providerId: nil
+            providerId: providerId,
+            strict: true
         ) {
             return catalog
         }

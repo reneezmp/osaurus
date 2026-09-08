@@ -24,48 +24,48 @@ import Testing
 struct IntelOAuthModelCatalogTests {
 
     @Test
-    func codexWithoutTokensFallsBackToTheBuiltInCatalog() async {
-        let models = await RemoteProviderManager.oauthModelCatalog(
+    func codexWithoutTokensFallsBackToTheBuiltInCatalog() async throws {
+        let models = try await RemoteProviderManager.oauthModelCatalog(
             providerType: .openAICodex, authType: .openAICodexOAuth, providerId: nil)
         #expect(models == OpenAICodexOAuthService.supportedModels)
         #expect(!(models ?? []).isEmpty)
     }
 
     @Test
-    func codexIsRecognizedByAuthTypeAloneWhenTheProviderTypeDisagrees() async {
+    func codexIsRecognizedByAuthTypeAloneWhenTheProviderTypeDisagrees() async throws {
         // The edit sheet can hand us a provider whose `providerType` was never
         // migrated to `.openAICodex`; the OAuth auth type is the reliable signal.
-        let models = await RemoteProviderManager.oauthModelCatalog(
+        let models = try await RemoteProviderManager.oauthModelCatalog(
             providerType: .openaiLegacy, authType: .openAICodexOAuth, providerId: nil)
         #expect(models == OpenAICodexOAuthService.supportedModels)
     }
 
     @Test
-    func codexIsRecognizedByProviderTypeAloneWhenTheAuthTypeDisagrees() async {
-        let models = await RemoteProviderManager.oauthModelCatalog(
+    func codexIsRecognizedByProviderTypeAloneWhenTheAuthTypeDisagrees() async throws {
+        let models = try await RemoteProviderManager.oauthModelCatalog(
             providerType: .openAICodex, authType: .none, providerId: nil)
         #expect(models == OpenAICodexOAuthService.supportedModels)
     }
 
     @Test
-    func xaiOAuthReturnsItsBuiltInCatalog() async {
-        let models = await RemoteProviderManager.oauthModelCatalog(
+    func xaiOAuthReturnsItsBuiltInCatalog() async throws {
+        let models = try await RemoteProviderManager.oauthModelCatalog(
             providerType: .openaiLegacy, authType: .xaiOAuth, providerId: nil)
         #expect(models == XAIOAuthService.supportedModels)
     }
 
     @Test
-    func apiKeyProvidersStillFallThroughToTheGenericProbe() async {
+    func apiKeyProvidersStillFallThroughToTheGenericProbe() async throws {
         for providerType in [RemoteProviderType.openaiLegacy, .anthropic, .gemini, .osaurus] {
-            let models = await RemoteProviderManager.oauthModelCatalog(
+            let models = try await RemoteProviderManager.oauthModelCatalog(
                 providerType: providerType, authType: .apiKey, providerId: nil)
             #expect(models == nil, "\(providerType) should use the generic /models probe")
         }
     }
 
     @Test
-    func unauthenticatedProvidersStillFallThroughToTheGenericProbe() async {
-        let models = await RemoteProviderManager.oauthModelCatalog(
+    func unauthenticatedProvidersStillFallThroughToTheGenericProbe() async throws {
+        let models = try await RemoteProviderManager.oauthModelCatalog(
             providerType: .openaiLegacy, authType: .none, providerId: nil)
         #expect(models == nil)
     }
