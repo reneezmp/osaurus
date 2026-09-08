@@ -68,6 +68,31 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         // fatally on `kqueue(): Too many open files` (APPLE-MACOS-19T).
         FileDescriptorLimit.raiseToMaximum()
 
+        #if OSAURUS_INTEL
+            // Headless replacement for the Apple Silicon "Securing your
+            // data" overlay (`StorageMigrationOverlay`, entirely
+            // `#if !OSAURUS_INTEL`). Nothing on this fork ever called
+            // `StorageMigrator.runIfNeeded()` before this hook existed —
+            // see `StorageMigrator.swift`'s `#if OSAURUS_INTEL` extension
+            // for the full decision tree and why it unconditionally
+            // releases `StorageMigrationCoordinator`'s gate on failure.
+            //
+            // Must run off the main actor: `StorageKeyManager.currentKey()`
+            // (called from `runIfNeeded()`) can raise a Keychain prompt,
+            // and blocking the main actor on a Keychain UI round-trip is a
+            // deadlock waiting to happen. `.userInitiated` because the two
+            // gated call sites (`MemoryDatabase.open()`,
+            // `SchedulerDatabase.open()`) are themselves launch-path
+            // background tasks that block on this finishing.
+            //
+            // Placement: immediately after `FileDescriptorLimit.raiseToMaximum()`
+            // and before any other `Task.detached` below — verified nothing
+            // in this method opens a SQLite database earlier than this line.
+            Task.detached(priority: .userInitiated) {
+                await StorageMigrator.shared.runHeadlessMigrationIfNeeded()
+            }
+        #endif
+
         if #unavailable(macOS 26.0) {
             let hideDockIcon = ServerConfigurationStore.load()?.hideDockIcon ?? false
             NSApp.setActivationPolicy(hideDockIcon ? .accessory : .regular)

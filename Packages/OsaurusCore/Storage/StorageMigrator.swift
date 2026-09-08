@@ -943,3 +943,87 @@ public actor StorageMigrator {
         OsaurusPaths.root().appendingPathComponent(Self.backupDirName, isDirectory: true)
     }
 }
+
+#if OSAURUS_INTEL
+
+    // MARK: - Headless launch-time migration (Intel)
+
+    /// On Apple Silicon `StorageMigrationOverlay.runMigration()` drives this
+    /// exact decision tree from a `@MainActor` `ObservableObject`, gated
+    /// behind a "Securing your data" `NSPanel` the user can watch and retry
+    /// from. Intel has neither: `StorageMigrationOverlay.swift` is entirely
+    /// `#if !OSAURUS_INTEL` (see that file's header), so nothing on this
+    /// fork ever called `runIfNeeded()` — a plaintext `~/.osaurus` database
+    /// was silently never adopted, and every keyed SQLCipher open against
+    /// it failed. This extension is the headless replacement: same
+    /// decision tree, no UI, called once from
+    /// `AppDelegate.applicationDidFinishLaunching` off the main actor.
+    ///
+    /// Added here (rather than as its own file) so `Package.swift`'s
+    /// exclude-list bookkeeping doesn't grow a new entry for a type that's
+    /// conceptually still "the migrator".
+    extension StorageMigrator {
+        /// Runs the full pristine/needs-migration/migrate decision tree
+        /// with no progress UI, then unconditionally releases
+        /// `StorageMigrationCoordinator`'s gate so the two Intel call
+        /// sites that block on it (`MemoryDatabase.open()` via
+        /// `MemorySearchService`, `SchedulerDatabase.open()` via
+        /// `NextRunScheduler`) can proceed.
+        ///
+        /// **Deliberate divergence from the Apple Silicon coordinator:**
+        /// `StorageMigrationOverlay.runMigration()` leaves its gate CLOSED
+        /// on a failed migration (`isReady = false`, `migrationTask = nil`)
+        /// so the user can hit "Retry" from the overlay/Settings and
+        /// re-attempt without relaunching. That's the right call there —
+        /// there's a human watching a panel who can retry.
+        ///
+        /// Headless, there is no human and no retry trigger. The only
+        /// callers blocked on this gate are background `Task`s
+        /// (`MemorySearchService.initialize()`, `NextRunScheduler`'s
+        /// detached task) with no UI to surface a "Retry" affordance to
+        /// and no mechanism to re-poke the gate later. Leaving the gate
+        /// closed on failure would mean those tasks — and every future
+        /// caller of a gated `*Database.open()` for the rest of the
+        /// process's life, since nothing re-opens the gate — hang until
+        /// `blockingAwaitReady()`'s 30s timeout fires, every single time,
+        /// forever. That's strictly worse than the failure mode we're
+        /// trading for: latch the gate ready unconditionally, log the
+        /// failure loudly, and let the individual `*Database.open()` call
+        /// that hits a still-plaintext (or partially-migrated) file fail
+        /// on its own with a logged SQLCipher error. A loud, isolated
+        /// failure on the one database that didn't migrate beats a
+        /// silent, permanent hang across every database on the machine.
+        public func runHeadlessMigrationIfNeeded() async {
+            defer { StorageMigrationCoordinator.markReady() }
+
+            if await isPristineInstall() {
+                await stampCurrentVersionIfMissing()
+                return
+            }
+
+            guard await needsMigration() else {
+                // Already migrated. Stamp defensively (idempotent — see
+                // `stampCurrentVersionIfMissing()`) so we don't re-scan
+                // disk every launch, and sweep the pre-encryption backup
+                // now that we know this install is caught up. Unlike the
+                // Apple Silicon overlay, nothing else on Intel ever calls
+                // `cleanupBackupIfStale()` — without this call
+                // `.pre-encryption-backup/` would accumulate forever.
+                await stampCurrentVersionIfMissing()
+                await cleanupBackupIfStale()
+                return
+            }
+
+            let result = await runIfNeeded()
+            switch result {
+            case .success(let version):
+                log.info("storage migrator (headless): completed, now at v\(version)")
+            case .failure(let error):
+                log.error(
+                    "storage migrator (headless): migration failed — \(error.localizedDescription). Gate is releasing anyway (see runHeadlessMigrationIfNeeded doc comment); individual database opens against still-plaintext files will fail loudly."
+                )
+            }
+        }
+    }
+
+#endif

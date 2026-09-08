@@ -18,6 +18,7 @@
 
 import Combine
 import Foundation
+import os
 
 #if OSAURUS_INTEL
 
@@ -74,13 +75,97 @@ enum TaskEventType: Int32 {
     case draft = 8
 }
 
-/// Intel stub for the storage-migration gate (real one lives in the
-/// `#if !OSAURUS_INTEL` `Views/Storage/StorageMigrationOverlay.swift`).
-/// Intel opens its databases directly with no cross-store migration phase,
-/// so `blockingAwaitReady()` returns immediately. `SchedulerDatabase`
-/// (un-excluded in this restore) calls it before its first query.
+/// Intel stand-in for the storage-migration gate (real one lives in the
+/// `#if !OSAURUS_INTEL` `Views/Storage/StorageMigrationOverlay.swift`, a
+/// `@MainActor` `ObservableObject` driving the "Securing your data" panel).
+///
+/// Intel has no overlay UI and no SwiftUI window server guarantee — the
+/// gate has to be a plain, actor-isolation-free latch that any background
+/// `Task` can block on without hopping to the main actor. It is
+/// deliberately dumb: unlike the Apple Silicon coordinator, this one does
+/// NOT lazily kick off `StorageMigrator.runIfNeeded()` itself. On Intel
+/// `AppDelegate.applicationDidFinishLaunching` is the single place that
+/// starts the headless migration runner (see the `#if OSAURUS_INTEL`
+/// block appended to `Storage/StorageMigrator.swift`); this type only
+/// blocks callers until that runner calls `markReady()`. Two call sites
+/// gate on it today, both already off the main actor:
+/// `MemoryDatabase.open()` and `SchedulerDatabase.open()`.
 enum StorageMigrationCoordinator {
-    nonisolated static func blockingAwaitReady() {}
+    /// Lock-free fast path so a caller that arrives after migration has
+    /// already completed never touches the semaphore/group machinery.
+    /// Mirrors `AtomicBool`'s doc-comment rationale: an
+    /// `OSAllocatedUnfairLock`-backed Bool costs the same as a bare
+    /// atomic load on Apple platforms, and there are effectively zero
+    /// writers (one, ever, per process).
+    private static let ready = AtomicBool(false)
+
+    /// Gates every waiter that arrives before `markReady()` fires.
+    /// `DispatchGroup` (rather than a single `DispatchSemaphore`) is used
+    /// because more than one thread can call `blockingAwaitReady()`
+    /// concurrently (memory DB open + scheduler DB open can race on
+    /// separate `Task.detached` background queues) and a semaphore's
+    /// single permit would only release one of them.
+    private static let group: DispatchGroup = {
+        let g = DispatchGroup()
+        g.enter()
+        return g
+    }()
+
+    /// Serializes `markReady()`. Two `AtomicBool`s checked and set
+    /// independently are each atomic but not atomic *together*: two
+    /// concurrent callers can both observe "not yet left" and both call
+    /// `group.leave()`, which traps on an already-balanced group. Only the
+    /// headless runner calls `markReady()` today, from a single `defer`,
+    /// but the method is documented as safe to call from anywhere — so it
+    /// has to actually be safe, not safe-by-current-call-graph.
+    private static let readyLock = NSLock()
+
+    /// Blocks the calling thread until the headless migration runner has
+    /// finished (successfully or not — see the divergence note below),
+    /// or until 30 seconds elapse.
+    ///
+    /// Order of checks matters:
+    ///  1. Test bypass — under `swift test` / XCTest there is no
+    ///     `AppDelegate.applicationDidFinishLaunching`, so nothing ever
+    ///     calls `markReady()`. Without this bypass every gated test
+    ///     (and every test that transitively opens a database) would
+    ///     block for the full 30-second timeout, or forever if this
+    ///     method is ever called from a context that already holds a
+    ///     lock the timeout path needs. See `RuntimeEnvironment.isUnderTests`.
+    ///  2. Lock-free fast path — the common case once launch has
+    ///     finished migrating.
+    ///  3. Bounded wait — 30 seconds is generous relative to a SQLCipher
+    ///     re-encryption pass over a handful of local SQLite files, but
+    ///     finite: a bug in the runner (a deadlock, a thrown error before
+    ///     the `defer` registers, whatever) must never permanently wedge
+    ///     every caller of a gated `*Database.open()` for the rest of the
+    ///     process's life. On timeout we log loudly and proceed anyway —
+    ///     the same "fail open" choice `runMigration()` makes below.
+    nonisolated static func blockingAwaitReady() {
+        if RuntimeEnvironment.isUnderTests { return }
+        if ready.load() { return }
+
+        let waitResult = group.wait(timeout: .now() + 30)
+        if waitResult == .timedOut {
+            Logger(subsystem: "ai.osaurus", category: "storage.migrator")
+                .error(
+                    "StorageMigrationCoordinator: blockingAwaitReady() timed out after 30s waiting for the headless migration runner; proceeding without the guarantee that storage is migrated"
+                )
+        }
+    }
+
+    /// Marks the gate ready and releases every thread currently parked in
+    /// `blockingAwaitReady()`. Idempotent — safe to call from a `defer` on
+    /// every exit path of the headless runner (including thrown/failed
+    /// ones) without worrying about a double `group.leave()` trapping the
+    /// process.
+    nonisolated static func markReady() {
+        readyLock.lock()
+        defer { readyLock.unlock() }
+        guard !ready.load() else { return }
+        ready.store(true)
+        group.leave()
+    }
 }
 
 /// Drives the menu-bar status card's "task running / finished" row on Intel.
