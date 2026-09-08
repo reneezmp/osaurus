@@ -366,10 +366,27 @@ public struct RemoteProvider: Codable, Identifiable, Sendable, Equatable {
         // with nothing pointing at the missing header. Refresh happens on the
         // paths that own the token lifecycle; a stale Bearer earning a 401 is a
         // far better failure than no Bearer earning a silent empty list.
-        if authType == .openAICodexOAuth, headers["Authorization"] == nil,
+        if authType == .openAICodexOAuth,
             let tokens = getOAuthTokens(), !tokens.accessToken.isEmpty
         {
-            headers["Authorization"] = "Bearer \(tokens.accessToken)"
+            if headers["Authorization"] == nil {
+                headers["Authorization"] = "Bearer \(tokens.accessToken)"
+            }
+            // The Bearer alone earns a 401 from `chatgpt.com/backend-api`. The
+            // Codex backend also requires the account the subscription belongs
+            // to, the experimental Responses opt-in, and an originator tag —
+            // the same trio `RemoteProviderService.codexOAuthHeaders()` sends.
+            // Setting them here rather than only there means every caller gets
+            // them, including builds where that service is compiled out.
+            if headers["chatgpt-account-id"] == nil, !tokens.accountId.isEmpty {
+                headers["chatgpt-account-id"] = tokens.accountId
+            }
+            if headers["OpenAI-Beta"] == nil {
+                headers["OpenAI-Beta"] = "responses=experimental"
+            }
+            if headers["originator"] == nil {
+                headers["originator"] = "codex_cli_rs"
+            }
         }
 
         // OpenRouter app attribution: surfaces Osaurus on openrouter.ai/rankings.

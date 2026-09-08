@@ -300,23 +300,16 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
             // with any `/v1` carried by their own `basePath`.
             guard let owner, let url = owner.url(for: owner.providerType.chatEndpoint) else { return nil }
 
-            var headers: [String: String] = ["Content-Type": "application/json"]
-            for (k, v) in owner.customHeaders { headers[k] = v }
-            if owner.authType == .apiKey,
-                let key = RemoteProviderKeychain.getAPIKey(for: owner.id),
-                !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                switch owner.providerType {
-                case .anthropic:
-                    headers["x-api-key"] = key
-                    if headers["anthropic-version"] == nil { headers["anthropic-version"] = "2023-06-01" }
-                case .gemini:
-                    headers["x-goog-api-key"] = key
-                case .azureOpenAI:
-                    headers["api-key"] = key
-                default:
-                    headers["Authorization"] = "Bearer \(key)"
-                }
-            }
+            // `resolvedHeaders()` rather than a local switch: it already knows
+            // every auth shape (per-provider API-key header names, the xAI and
+            // ChatGPT/Codex OAuth bearers plus Codex's required
+            // `chatgpt-account-id` / `OpenAI-Beta` / `originator` trio, secret
+            // headers out of the Keychain, OpenRouter attribution). This block
+            // used to hand-roll the API-key half only, so an OAuth provider was
+            // sent no credentials at all and every Codex turn came back
+            // `401 {"detail":"Unauthorized"}`.
+            var headers = owner.resolvedHeaders()
+            if headers["Content-Type"] == nil { headers["Content-Type"] = "application/json" }
             return ResolvedEndpoint(
                 url: url.absoluteString,
                 headers: headers,
