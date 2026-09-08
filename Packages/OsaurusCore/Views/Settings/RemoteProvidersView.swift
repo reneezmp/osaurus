@@ -30,6 +30,7 @@ struct RemoteProvidersView: View {
     @State private var addSheetConfig: AddSheetConfig?
     @State private var editingProvider: RemoteProvider?
     @State private var showReorderSheet = false
+    @State private var showingClaudeCodeSetup = false
     @State private var hasAppeared = false
 
     private struct AddSheetConfig: Identifiable {
@@ -48,6 +49,7 @@ struct RemoteProvidersView: View {
             // Content
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    claudeCodeCard
                     if manager.configuration.providers.isEmpty {
                         emptyStateView
                     } else {
@@ -86,6 +88,14 @@ struct RemoteProvidersView: View {
             RemoteProviderReorderSheet()
                 .environment(\.theme, themeManager.currentTheme)
         }
+        .sheet(isPresented: $showingClaudeCodeSetup) {
+            ClaudeCodeSetupStep(
+                onBack: { showingClaudeCodeSetup = false },
+                onDone: { showingClaudeCodeSetup = false }
+            )
+            .frame(minWidth: 520, minHeight: 520)
+            .environment(\.theme, themeManager.currentTheme)
+        }
     }
 
     // MARK: - Header
@@ -118,6 +128,50 @@ struct RemoteProvidersView: View {
             let modelCount = manager.providerStates.values.reduce(0) { $0 + $1.modelCount }
             return "\(connectedCount) connected \u{2022} \(modelCount) model\(modelCount == 1 ? "" : "s") available"
         }
+    }
+
+    private var claudeCodeCard: some View {
+        Button { showingClaudeCodeSetup = true } label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(
+                            LinearGradient(
+                                colors: ClaudeCodeConfiguration.brandGradient,
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Image(systemName: "terminal.fill")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundColor(.white)
+                }
+                .frame(width: 44, height: 44)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Claude Code", bundle: .module)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Use your local Claude Code sign-in — no API key required", bundle: .module)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.secondaryText)
+                }
+                Spacer()
+                Text(ClaudeCodeConfiguration.isAvailable() ? "Configure" : "Set Up", bundle: .module)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(theme.accentColor)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.tertiaryText)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(theme.cardBackground)
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.cardBorder, lineWidth: 1))
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Empty State

@@ -1,5 +1,8 @@
 # Upstream 0.20.3 → 0.24.3 — Intel fork triage ledger
 
+> **2026-09-08 correction:** The historical `DEFER` label below conflated difficulty, mixed commits, and actual incompatibility. [The full feasibility audit](DEFER_FEASIBILITY_AUDIT_2026-09-08.md) supersedes those verdicts: 58/73 are feasible Intel work; 15 are true skips.
+
+
 Range: `9124d696..4528b56f` (783 commits). 307 auto-eliminated (docs/CI/appcast/i18n/evals, vmlx repins + Package.resolved churn, amputated-subsystem-only, brand-new upstream subsystems). 476 reviewed below.
 
 # Window 1
@@ -487,7 +490,7 @@ Range: `9124d696..4528b56f` (783 commits). 307 auto-eliminated (docs/CI/appcast/
 | 0129221a | Warn when switching models mid-conversation | PORT | Chat UX safety warning |
 | 78fccf9c | Make denied chat tool outcomes visible | SKIP | Tool denial plugin-specific |
 | 1517ceac | Give loaded skills directory anchor | SKIP | Skills subsystem amputated |
-| eca456c3 | Add Claude Code CLI integration | DEFER | MCP depends on amputated ToolIndex |
+| eca456c3 | Add Claude Code CLI integration | PORT | Intel hand-port: CLI discovery/auth, safe text streaming, picker routing, and process teardown; MCP agent mode remains roadmap work |
 | 4137884f | Recover media rejections and harden OpenAI | PORT | Media and OpenAI provider hardening |
 | 1f052d17 | Show and cancel exact live inference work | DEFER | Live activity UI local inference tied |
 | 96b05d20 | Hide local memory warnings for cloud models | PORT | Cloud model UX improvement |

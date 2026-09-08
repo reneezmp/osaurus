@@ -1,5 +1,8 @@
 # Upstream triage: 0.24.3 → 0.24.7
 
+> **2026-09-08 correction:** The historical `DEFER` label below conflated difficulty, mixed commits, and actual incompatibility. [The full feasibility audit](DEFER_FEASIBILITY_AUDIT_2026-09-08.md) supersedes those verdicts: 58/73 are feasible Intel work; 15 are true skips.
+
+
 **Range:** `490e0a58..7e109ade` (inclusive) — 53 commits
 
 This ledger is the final Intel verdict for the upstream 0.24.4–0.24.7 window.

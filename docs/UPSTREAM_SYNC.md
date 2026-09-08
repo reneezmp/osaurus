@@ -501,3 +501,13 @@ categories to watch for:
 cd Packages/OsaurusCore && swift build --arch x86_64
 ```
 Fix every "only available in macOS 14/15" error, rebuild, repeat until clean.
+
+---
+
+## 2026-09-08 — Claude Code Intel hand-port and deferred-verdict correction
+
+- Ported the useful core of upstream `eca456c3` without the excluded MLX service registry or MCP bridge: executable discovery, CLI-owned authentication, safe text-only streaming, Claude model aliases, settings setup/status, cancellation, and child-process teardown.
+- The CLI receives prompts on stdin, runs statelessly, ignores user MCP servers, and has every built-in tool disabled in this first slice. Osaurus does not read or store Claude credentials.
+- Verified current Anthropic requirements support macOS 13 and x64. The setup screen uses the current native installer and discovers its `~/.local/bin/claude` launcher.
+- Re-audited all 73 historical `DEFER` rows. The authoritative correction is `docs/DEFER_FEASIBILITY_AUDIT_2026-09-08.md`: 58 are feasible Intel work (1 landed, 28 port-next, 29 roadmap); 15 are product/runtime skips. Difficulty and mixed-file scope are no longer accepted as incompatibility reasons.
+- Validation at this checkpoint: package build passes; 730 tests / 108 suites pass, including 21 Claude configuration/streaming tests. x86_64 and workspace gates follow after commit-ready review.

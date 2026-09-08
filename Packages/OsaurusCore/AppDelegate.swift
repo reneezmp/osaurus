@@ -345,6 +345,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
     public func applicationWillTerminate(_ notification: Notification) {
         NSLog("Osaurus (Intel) terminating")
         Task { @MainActor in
+            await ClaudeCodeProcessRegistry.shared.terminateAll()
             await MCPBridge.shared.stop()
             await server.stop()
         }

@@ -340,8 +340,11 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
     }
 
     func streamChat(request: ChatCompletionRequest) async throws -> AsyncThrowingStream<String, Error> {
-        let toolSpecs = encodeTools(request.tools)
         let resolvedModel = request.model ?? model
+        if IntelClaudeCodeService.handles(resolvedModel) {
+            return try await IntelClaudeCodeService.shared.streamChat(request: request)
+        }
+        let toolSpecs = encodeTools(request.tools)
 
         guard let endpoint = await resolveEndpoint(forModel: resolvedModel) else {
             throw EngineError(
@@ -610,6 +613,9 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
 
     func completeChat(request: ChatCompletionRequest) async throws -> ChatCompletionResponse {
         let resolvedModel = request.model ?? model
+        if IntelClaudeCodeService.handles(resolvedModel) {
+            return try await IntelClaudeCodeService.shared.completeChat(request: request)
+        }
         guard let endpoint = await resolveEndpoint(forModel: resolvedModel) else {
             throw EngineError(
                 message:

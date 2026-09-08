@@ -486,6 +486,20 @@ final class ModelPickerItemCache: ObservableObject, @unchecked Sendable {
         let built: [ModelPickerItem] = await MainActor.run {
             var out: [ModelPickerItem] = []
             var seen = Set<String>()
+            if ClaudeCodeConfiguration.isAvailable() {
+                let sourceId = UUID(uuidString: "C1A0DE00-C0DE-4000-8000-000000000001")!
+                for model in ClaudeCodeModel.allCases {
+                    out.append(
+                        ModelPickerItem(
+                            id: model.pickerId,
+                            displayName: model.displayName,
+                            source: .remote(providerName: "Claude Code", providerId: sourceId),
+                            description: "Uses your signed-in Claude Code CLI subscription"
+                        )
+                    )
+                    seen.insert(model.pickerId)
+                }
+            }
             let manager = RemoteProviderManager.shared
             let providers = manager.configuration.providers.filter { $0.enabled }
             for provider in providers {
