@@ -314,6 +314,26 @@ public struct AutonomousExecConfig: Codable, Sendable, Equatable {
         self.commandTimeout = commandTimeout
         self.pluginCreate = pluginCreate
     }
+
+    /// Decode field-by-field with the `default` values as fallbacks.
+    ///
+    /// Every field here is non-optional, so the synthesized initializer fails
+    /// the whole decode when any one of them is absent — and an agent JSON
+    /// written by a build that predates a field (or by a differently-versioned
+    /// Osaurus on another Mac) is absent exactly that way. `AgentManager`
+    /// loads agents with `try?`, so the failure surfaced as an agent silently
+    /// missing from the list rather than as an error: one added key on one
+    /// machine made every agent vanish on the other.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = AutonomousExecConfig.default
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? fallback.enabled
+        maxCommandsPerTurn =
+            try c.decodeIfPresent(Int.self, forKey: .maxCommandsPerTurn) ?? fallback.maxCommandsPerTurn
+        commandTimeout =
+            try c.decodeIfPresent(Int.self, forKey: .commandTimeout) ?? fallback.commandTimeout
+        pluginCreate = try c.decodeIfPresent(Bool.self, forKey: .pluginCreate) ?? fallback.pluginCreate
+    }
 }
 
 // Persona-as-JSON export/import was removed: the share-deeplink flow
