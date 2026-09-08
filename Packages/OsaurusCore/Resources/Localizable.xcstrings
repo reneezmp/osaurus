@@ -70,6 +70,198 @@
         }
       }
     },
+    "Already have an identity on another Mac?" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sie haben bereits eine Identität auf einem anderen Mac?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在另一台 Mac 上拥有身份？"
+          }
+        }
+      }
+    },
+    "Current identity" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktuelle Identität"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前身份"
+          }
+        }
+      }
+    },
+    "Enter a valid phrase" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gültige Phrase eingeben"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请输入有效短语"
+          }
+        }
+      }
+    },
+    "I understand: agents get new addresses, existing access keys are revoked, and the current identity's recovery phrase will no longer restore this Mac unless I saved it." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mir ist klar: Agenten erhalten neue Adressen, bestehende Zugriffsschlüssel werden widerrufen, und die Wiederherstellungsphrase der aktuellen Identität stellt diesen Mac nicht mehr her, sofern ich sie nicht gesichert habe."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "我明白：代理将获得新地址，现有的访问密钥将被吊销，并且当前身份的恢复短语将无法再恢复此 Mac，除非我已保存它。"
+          }
+        }
+      }
+    },
+    "Paste the 24-word recovery phrase from your other Mac to restore your identity here. If iCloud Keychain is enabled on both Macs, the identity usually syncs on its own — the phrase is only needed when it doesn't." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fügen Sie die 24-Wort-Wiederherstellungsphrase Ihres anderen Mac ein, um Ihre Identität hier wiederherzustellen. Wenn der iCloud-Schlüsselbund auf beiden Macs aktiviert ist, wird die Identität normalerweise von selbst synchronisiert — die Phrase wird nur benötigt, wenn das nicht geschieht."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "粘贴另一台 Mac 上的 24 个单词恢复短语，即可在此恢复您的身份。如果两台 Mac 都启用了 iCloud 钥匙串，身份通常会自动同步——只有在未同步时才需要该短语。"
+          }
+        }
+      }
+    },
+    "Paste the 24-word recovery phrase of the identity you want to switch to. This replaces the identity currently on this Mac." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fügen Sie die 24-Wort-Wiederherstellungsphrase der Identität ein, zu der Sie wechseln möchten. Damit wird die aktuelle Identität auf diesem Mac ersetzt."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "粘贴您想要切换到的身份的 24 个单词恢复短语。这将替换此 Mac 上当前的身份。"
+          }
+        }
+      }
+    },
+    "Replace Identity" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Identität ersetzen"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "替换身份"
+          }
+        }
+      }
+    },
+    "Replaces the identity on this Mac with one restored from a 24-word phrase. Agents get new addresses and existing access keys are revoked." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ersetzt die Identität auf diesem Mac durch eine aus einer 24-Wort-Phrase wiederhergestellte Identität. Agenten erhalten neue Adressen und bestehende Zugriffsschlüssel werden widerrufen."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用通过 24 个单词恢复短语还原的身份替换此 Mac 上的身份。代理将获得新地址，现有的访问密钥将被吊销。"
+          }
+        }
+      }
+    },
+    "Restore Identity" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Identität wiederherstellen"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复身份"
+          }
+        }
+      }
+    },
+    "Restore from recovery phrase" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aus Wiederherstellungsphrase wiederherstellen"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通过恢复短语恢复"
+          }
+        }
+      }
+    },
+    "Restored identity" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wiederhergestellte Identität"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复的身份"
+          }
+        }
+      }
+    },
+    "Restore…" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wiederherstellen…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复…"
+          }
+        }
+      }
+    },
     "—" : {
       "comment" : "A placeholder text to indicate missing data.",
       "isCommentAutoGenerated" : true,

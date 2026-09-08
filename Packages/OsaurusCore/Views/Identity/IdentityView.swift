@@ -22,7 +22,7 @@ struct IdentityView: View {
     @State private var phase: IdentityPhase = .checking
     @State private var drift: IdentityDrift?
 
-    @State private var showRecoverSheet = false
+    @State private var restorePresentation: RestorePresentation?
     @State private var showRepairConfirm = false
     @State private var showResetConfirm = false
     @State private var showRecoveryPhraseSheet = false
@@ -30,6 +30,14 @@ struct IdentityView: View {
     @State private var recoveryPhraseError: String?
     @State private var isLoadingRecoveryPhrase = false
     @State private var lastActionResult: ActionResult?
+
+    /// Identifiable wrapper so the single restore sheet can be driven by
+    /// `.sheet(item:)` across all three entry modes (drift repair, fresh
+    /// restore with no identity on disk, and replacing a healthy identity).
+    private struct RestorePresentation: Identifiable {
+        let id = UUID()
+        let mode: RecoverFromMnemonicMode
+    }
 
     /// Result of the most recent recover / repair / reset action, surfaced in
     /// the inline banner above the sections. `nil` hides the banner.
@@ -62,11 +70,11 @@ struct IdentityView: View {
                 hasAppeared = true
             }
         }
-        .sheet(isPresented: $showRecoverSheet) {
+        .sheet(item: $restorePresentation) { presentation in
             RecoverFromMnemonicSheet(
-                mode: .driftRepair(drift ?? IdentityDrift(mismatchedAgents: [], staleAccessKeys: [])),
+                mode: presentation.mode,
                 onRecovered: handleRecovered,
-                onCancel: { showRecoverSheet = false }
+                onCancel: { restorePresentation = nil }
             )
             .environment(\.theme, theme)
         }
@@ -112,7 +120,12 @@ struct IdentityView: View {
             ProgressView()
                 .frame(maxWidth: .infinity, minHeight: 200)
         case .noIdentity:
-            IdentitySetupCard(onCreated: handleIdentityCreated)
+            IdentitySetupCard(
+                onCreated: handleIdentityCreated,
+                onRestore: {
+                    restorePresentation = RestorePresentation(mode: .freshRestore)
+                }
+            )
         case .ready(let osaurusId, let deviceId):
             readyContent(osaurusId: osaurusId, deviceId: deviceId)
         }
@@ -123,7 +136,13 @@ struct IdentityView: View {
         if let drift, drift.hasDrift {
             IdentityDriftBanner(
                 drift: drift,
-                onRecover: { showRecoverSheet = true },
+                onRecover: {
+                    restorePresentation = RestorePresentation(
+                        mode: .driftRepair(
+                            drift ?? IdentityDrift(mismatchedAgents: [], staleAccessKeys: [])
+                        )
+                    )
+                },
                 onRepair: { showRepairConfirm = true },
                 onReset: { showResetConfirm = true }
             )
@@ -144,7 +163,14 @@ struct IdentityView: View {
             onChange: { runRefresh() }
         )
         DeviceSection(deviceId: deviceId)
-        DangerZoneSection(onReset: { showResetConfirm = true })
+        DangerZoneSection(
+            onRestore: {
+                restorePresentation = RestorePresentation(
+                    mode: .replaceExisting(current: osaurusId)
+                )
+            },
+            onReset: { showResetConfirm = true }
+        )
     }
 
     // MARK: - Header
@@ -268,7 +294,7 @@ struct IdentityView: View {
     // MARK: - Recover
 
     private func handleRecovered(_ result: OsaurusIdentity.RestoreResult) {
-        showRecoverSheet = false
+        restorePresentation = nil
         // The master always installed if we got here; `failures` lists per-item
         // reconciliation problems (agents/access keys), so surface those rather
         // than claiming an unqualified success.
@@ -537,11 +563,43 @@ private struct IdentityDriftBanner: View {
 
 private struct DangerZoneSection: View {
     @Environment(\.theme) private var theme
+    let onRestore: () -> Void
     let onReset: () -> Void
 
     var body: some View {
         IdentitySection(title: "DANGER ZONE", icon: "exclamationmark.triangle.fill") {
-            HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Restore from recovery phrase", bundle: .module)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text(
+                            "Replaces the identity on this Mac with one restored from a 24-word phrase. Agents get new addresses and existing access keys are revoked.",
+                            bundle: .module
+                        )
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button(action: onRestore) {
+                        Text("Restore…", bundle: .module)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(theme.warningColor)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(theme.warningColor.opacity(0.10))
+                            )
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+
+                Divider().opacity(0.5)
+
+                HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Reset Identity", bundle: .module)
                         .font(.system(size: 13, weight: .semibold))
@@ -567,6 +625,7 @@ private struct DangerZoneSection: View {
                         )
                 }
                 .buttonStyle(PlainButtonStyle())
+                }
             }
         }
     }
@@ -589,6 +648,10 @@ private struct IdentitySetupCard: View {
     private var theme: ThemeProtocol { themeManager.currentTheme }
 
     let onCreated: (IdentityInfo) -> Void
+    /// Presents the fresh-restore sheet: this Mac has no identity and the
+    /// user wants to bring one over from another Mac via its 24-word phrase
+    /// instead of minting a brand-new master.
+    let onRestore: () -> Void
 
     @State private var isCreating = false
     @State private var errorMessage: String?
@@ -651,6 +714,34 @@ private struct IdentitySetupCard: View {
             }
             .buttonStyle(PlainButtonStyle())
             .disabled(isCreating)
+
+            VStack(spacing: 6) {
+                Text("Already have an identity on another Mac?", bundle: .module)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.tertiaryText)
+
+                Button(action: onRestore) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise.circle")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Restore from recovery phrase", bundle: .module)
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(theme.primaryText)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(theme.tertiaryBackground)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(theme.cardBorder, lineWidth: 1)
+                            )
+                    )
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(isCreating)
+            }
 
             Spacer().frame(height: 40)
         }
