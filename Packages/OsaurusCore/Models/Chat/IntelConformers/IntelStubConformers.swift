@@ -310,6 +310,21 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
     private func probeModelsDiscovery(for provider: RemoteProvider) async -> (
         models: [String], contextLengths: [String: Int]
     ) {
+        // OAuth providers don't answer a plain `/models` GET, so resolve their
+        // catalogs before falling through to the generic probe. Upstream's
+        // `RemoteProviderService.fetchModels` branches the same way; this Intel
+        // mirror was missing both branches, so signing in to ChatGPT/Codex
+        // showed its models during sign-in and then an empty picker forever
+        // after — the probe was GETting `chatgpt.com/backend-api/models`
+        // unauthenticated and swallowing the non-2xx.
+        if let catalog = await Self.oauthModelCatalog(
+            providerType: provider.providerType,
+            authType: provider.authType,
+            providerId: provider.id
+        ) {
+            return (catalog, [:])
+        }
+
         var headers = provider.customHeaders
         if provider.authType == .apiKey,
             let key = RemoteProviderKeychain.getAPIKey(for: provider.id),
@@ -556,6 +571,38 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
     /// pragmatic Intel mirror that does the OpenAI-compatible GET /models probe
     /// (which covers DeepSeek and friends) so add/edit actually works. Returns
     /// the discovered model ids.
+    /// Model catalog for providers whose credentials aren't an API key, or nil
+    /// when the caller should fall through to the generic `/models` probe.
+    ///
+    /// - ChatGPT/Codex: refreshes an expired token (persisting the result) and
+    ///   asks the service, which does a live fetch and falls back to its
+    ///   built-in list. With no `providerId` there are no tokens to read, so
+    ///   the built-in list is returned directly.
+    /// - xAI (Grok): OAuth tokens are refused by `/models` with HTTP 403
+    ///   upstream, so the built-in catalog is the only answer available.
+    // Internal (not private) for direct testing.
+    static func oauthModelCatalog(
+        providerType: RemoteProviderType,
+        authType: RemoteProviderAuthType,
+        providerId: UUID?
+    ) async -> [String]? {
+        if providerType == .openAICodex || authType == .openAICodexOAuth {
+            guard let providerId else { return OpenAICodexOAuthService.supportedModels }
+            var tokens = RemoteProviderKeychain.getOAuthTokens(for: providerId)
+            if let current = tokens, current.isExpired,
+                let refreshed = try? await OpenAICodexOAuthService.refresh(current)
+            {
+                await RemoteProviderKeychain.saveOAuthTokensOffMainActor(refreshed, for: providerId)
+                tokens = refreshed
+            }
+            return await OpenAICodexOAuthService.availableModels(for: tokens)
+        }
+        if authType == .xaiOAuth {
+            return XAIOAuthService.supportedModels
+        }
+        return nil
+    }
+
     func testConnection(
         host: String,
         providerProtocol: RemoteProviderProtocol,
@@ -572,6 +619,19 @@ final class RemoteProviderManager: ObservableObject, @unchecked Sendable {
         // catalog fetch instead — the same call that populates the picker.
         if providerType == .osaurusRouter {
             return try await OsaurusRouterAPIClient().models().map(\.id).sorted()
+        }
+
+        // Same reasoning as `probeModelsDiscovery`: a `/models` GET against an
+        // OAuth provider fails, so "Test" reported a bare HTTP error for a
+        // perfectly healthy ChatGPT/Codex sign-in. No provider id reaches this
+        // call from every call site, so this resolves the static catalog when
+        // it can't read tokens — which for Codex is the real catalog anyway.
+        if let catalog = await Self.oauthModelCatalog(
+            providerType: providerType,
+            authType: authType,
+            providerId: nil
+        ) {
+            return catalog
         }
 
         let tempProvider = RemoteProvider(

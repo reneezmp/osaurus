@@ -359,6 +359,19 @@ public struct RemoteProvider: Codable, Identifiable, Sendable, Equatable {
             headers["Authorization"] = "Bearer \(tokens.accessToken)"
         }
 
+        // ChatGPT/Codex OAuth: same treatment as xAI above. Without this, every
+        // generic OpenAI-compatible path (model discovery, "Test") sends a Codex
+        // provider no credentials at all — the request goes out bare, comes back
+        // non-2xx, and the caller reports an empty model list or a bare failure
+        // with nothing pointing at the missing header. Refresh happens on the
+        // paths that own the token lifecycle; a stale Bearer earning a 401 is a
+        // far better failure than no Bearer earning a silent empty list.
+        if authType == .openAICodexOAuth, headers["Authorization"] == nil,
+            let tokens = getOAuthTokens(), !tokens.accessToken.isEmpty
+        {
+            headers["Authorization"] = "Bearer \(tokens.accessToken)"
+        }
+
         // OpenRouter app attribution: surfaces Osaurus on openrouter.ai/rankings.
         // Constants live on `OpenRouterOAuthService.Attribution` so the OAuth
         // app row and these per-request headers can't drift. nil-checks let
