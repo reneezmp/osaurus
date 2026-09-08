@@ -366,6 +366,15 @@ struct RecoverFromMnemonicSheet: View {
         requiresExplicitOverride = false
         isRestoring = true
 
+        Task { @MainActor in
+            await performRestore(forceOverride: forceOverride)
+        }
+    }
+
+    /// `OsaurusIdentity.restore` is async because it attests the device when
+    /// this Mac has never generated an identity — a fresh restore otherwise
+    /// installs the master and then reads back as "no identity".
+    private func performRestore(forceOverride: Bool) async {
         do {
             // Drift repair verifies the phrase is the *previous* master before
             // installing, so a typo'd-but-valid mnemonic can't silently mint a
@@ -385,7 +394,7 @@ struct RecoverFromMnemonicSheet: View {
                 }
             }
 
-            let result = try OsaurusIdentity.restore(words: parsedWords)
+            let result = try await OsaurusIdentity.restore(words: parsedWords)
             statusIsError = false
             statusMessage = successMessage(for: result)
             isRestoring = false

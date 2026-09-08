@@ -251,7 +251,12 @@ struct IdentityView: View {
                 priority: .userInitiated
             ) {
                 do {
-                    let deviceId = try DeviceKey.currentDeviceId()
+                    // `ensureDeviceId`, not `currentDeviceId`: a master that
+                    // arrived by restore or iCloud Keychain sync was never
+                    // paired with a device attestation, and treating that as
+                    // "no identity" would hide a perfectly good master behind
+                    // the setup card.
+                    let deviceId = try await DeviceKey.ensureDeviceId()
                     let context = OsaurusIdentityContext.biometric()
                     var masterKeyData = try MasterKey.getPrivateKey(context: context)
                     defer { masterKeyData.zeroOut() }

@@ -59,7 +59,9 @@ public struct OsaurusIdentity: Sendable {
         let context = LAContext()
         context.touchIDAuthenticationAllowableReuseDuration = 300
         let osaurusId = try MasterKey.getOsaurusId(context: context)
-        let deviceId = try DeviceKey.currentDeviceId()
+        // Lazily attest: the master may have arrived via iCloud Keychain sync
+        // or a mnemonic restore, neither of which ever ran `DeviceKey.attest`.
+        let deviceId = try await DeviceKey.ensureDeviceId()
         return IdentityInfo(
             osaurusId: osaurusId,
             deviceId: deviceId,
@@ -99,14 +101,23 @@ public struct OsaurusIdentity: Sendable {
     ///   signed by the old master are revoked — the same actions as the
     ///   drift banner's Repair.
     ///
+    /// Attests the device when it hasn't been attested yet, so a restore
+    /// onto a Mac that never ran `setup()` produces a complete identity.
+    ///
     /// Posts `.osaurusIdentityChanged` so identity-gated services can
     /// reconnect under the restored identity without a manual refresh.
     @MainActor
-    public static func restore(words: [String]) throws -> RestoreResult {
+    public static func restore(words: [String]) async throws -> RestoreResult {
         var seed = try MasterKeyMnemonic.key(fromMnemonic: words)
         defer { seed.zeroOut() }
 
         let osaurusId = try MasterKey.install(seed: seed, allowReplace: true)
+
+        // Attest before anything reads the identity back. `setup()` does this
+        // for a generated master; without it a restore onto a Mac that never
+        // generated an identity installs the master and then reads back as
+        // "no identity", dumping the user on the setup screen with no error.
+        _ = try? await DeviceKey.ensureDeviceId()
         // Keep the stored phrase in sync with the newly-installed master so
         // "View recovery phrase" reads the store instead of lazily
         // re-deriving from the seed.

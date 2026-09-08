@@ -63,6 +63,33 @@ public struct DeviceKey: Sendable {
 
     // MARK: - Device ID
 
+    /// Device ID for this Mac, attesting on first use.
+    ///
+    /// `attest()` only ever runs from `OsaurusIdentity.setup()` — the
+    /// *generate* path — so a Mac that received its master key any other way
+    /// (mnemonic restore, iCloud Keychain sync from another Mac) has a master
+    /// in Keychain and no device ID in UserDefaults. `currentDeviceId()` then
+    /// throws `deviceNotAttested` and every caller that treats that as "no
+    /// identity" bounces the user back to the setup screen even though the
+    /// master installed fine. Attest lazily instead so those paths heal.
+    ///
+    /// Falls back to a software device ID when `attest()` itself fails
+    /// (offline, or App Attest reports supported but refuses the key — e.g.
+    /// unrecognized hardware). A software ID is what `attest()` already hands
+    /// back on Macs without App Attest, and it beats stranding a valid
+    /// identity behind an unreachable Apple service.
+    public static func ensureDeviceId() async throws -> String {
+        if let id = UserDefaults.standard.string(forKey: deviceIdKey) { return id }
+        do {
+            return try await attest()
+        } catch {
+            let deviceId = generateSoftwareDeviceId()
+            UserDefaults.standard.set(deviceId, forKey: deviceIdKey)
+            UserDefaults.standard.set(true, forKey: softwareMarker)
+            return deviceId
+        }
+    }
+
     /// Read the stored device ID.
     public static func currentDeviceId() throws -> String {
         guard let id = UserDefaults.standard.string(forKey: deviceIdKey) else {
