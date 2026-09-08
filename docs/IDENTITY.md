@@ -320,9 +320,9 @@ A standard BIP39 24-word mnemonic encoding the 32-byte master key. This is the o
 
 - **Algorithm:** BIP39 §3. 256 bits of entropy plus the high 8 bits of `SHA-256(entropy)` as a checksum (264 bits total = 24 × 11), split into 24 11-bit big-endian indices into the canonical 2048-word English wordlist.
 - **Encoding:** Implemented in [`Identity/MasterKeyMnemonic.swift`](../Packages/OsaurusCore/Identity/MasterKeyMnemonic.swift) with no external SwiftPM dependency. The wordlist ships as a bundle resource at `Resources/Identity/bip39-english.txt`.
-- **Display:** Shown exactly once during onboarding's recovery phase and once in `IdentityView.RecoveryPromptCard` immediately after a fresh `OsaurusIdentity.setup()`. Rendered as a 4×6 grid with "Copy phrase", "Save as .txt", and "Print" actions.
+- **Storage and display:** `OsaurusIdentity.setup()` persists the phrase to iCloud Keychain via `MasterMnemonicStore`, so there is no longer a one-shot "write this down" screen gating onboarding. It is read back on demand from **Settings → Identity → View recovery phrase**, which renders it as a 4×6 grid with "Copy phrase", "Save as .txt", and "Print" actions. Installs that predate `MasterMnemonicStore` have no stored entry; that path re-derives the phrase from the seed (one extra biometric prompt) and writes it through, so later reads hit the store.
 - **Memory hygiene:** The 32-byte seed is held only on the stack of `OsaurusIdentity.setup()` long enough to compute the mnemonic, then wiped via `Data.zeroOut()` (which calls `memset` over the underlying buffer).
-- **Acknowledgement:** A `masterMnemonicAcknowledged` UserDefaults flag (canonicalised in `IdentityDefaultsKey`) is set when the user confirms "I've saved it". On subsequent launches the Identity view shows a yellow "Master key backup not confirmed" banner whenever the flag is missing.
+- **Acknowledgement:** `IdentityDefaultsKey.masterMnemonicAcknowledged` survives from the write-it-down era. It is cleared by `OsaurusIdentity.wipe()` and read by nothing — there is no "backup not confirmed" banner any more, because the phrase is in iCloud Keychain rather than only in the user's notebook.
 
 ### One-time recovery code (server-side claim)
 
@@ -336,6 +336,20 @@ Format: `OSAURUS-` prefix followed by 4 groups of 4 uppercase hex characters (8 
 - Single-use; consumed when claimed against the Osaurus directory.
 - **Cannot rebuild the local master** — it is only an authenticator for the future server-side recovery flow.
 - Discarded from application memory after display; never stored on device in plaintext.
+
+### Where restore is offered
+
+`RecoverFromMnemonicSheet` serves three entry points, all from **Settings → Identity**:
+
+| Mode | Entry point | Extra safety |
+|---|---|---|
+| `freshRestore` | "Restore from recovery phrase", under **Generate Identity** on the no-identity setup card | none — there is nothing on disk to contradict |
+| `replaceExisting` | "Restore from recovery phrase" in **Danger Zone**, above Reset | shows the current vs. restored address, and requires an explicit acknowledgment that agents are re-minted and access keys revoked |
+| `driftRepair` | "Recover from phrase" on the drift banner | verifies the phrase reproduces the persisted agent addresses before installing; an unrelated-but-valid phrase requires "Restore Anyway" |
+
+All three call `OsaurusIdentity.restore(words:)`, which installs the decoded master with `allowReplace: true`, re-stores the phrase, re-derives mismatched agents at fresh indices, and revokes access keys signed by the previous master.
+
+**Restore attests the device.** `DeviceKey.attest()` historically ran only from `OsaurusIdentity.setup()` — the *generate* path — so a Mac that received its master any other way (restore, or iCloud Keychain sync) had a valid master and no device ID. `DeviceKey.currentDeviceId()` then threw `deviceNotAttested`, callers read that as "no identity", and the user was returned to the setup card with no error while the master sat in the Keychain. `restore` now calls `DeviceKey.ensureDeviceId()`, which attests on first use and falls back to a software device ID when App Attest itself fails (offline, or hardware Apple does not recognize). Both identity loaders use it, so installs already in that state recover on next launch.
 
 ### The three "fix it" exits
 

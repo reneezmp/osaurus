@@ -16,6 +16,7 @@ This document covers what's encrypted, how the key is managed, what happens duri
 - [Storage Settings](#storage-settings)
 - [Background Maintenance](#background-maintenance)
 - [Storage Paths Reference](#storage-paths-reference)
+- [Migrating an install to another Mac](#migrating-an-install-to-another-mac)
 - [Limitations and Trade-offs](#limitations-and-trade-offs)
 
 ---
@@ -155,6 +156,16 @@ sequenceDiagram
 
 Every `*Database.shared.open()` call site also calls `blockingAwaitReady()` defensively, so plugin loaders or HTTP handlers that race the AppDelegate can never open a still-plaintext file with an encryption key set.
 
+#### Headless migration on Intel
+
+`StorageMigrationCoordinator` above is the `@MainActor` class that drives the "Securing your data" overlay, and it lives entirely inside `#if !OSAURUS_INTEL`. The Intel build therefore runs the same migrator with no UI:
+
+- The Intel `StorageMigrationCoordinator` (in `IntelConformers/IntelScheduleConformers.swift`) is a plain latch — an `AtomicBool` fast path over a pre-entered `DispatchGroup`, with no actor isolation so any background thread can park on it. A `DispatchGroup` rather than a semaphore, because more than one waiter can arrive at once (memory and scheduler open from separate detached tasks) and a single permit would wake only one.
+- `StorageMigrator.runHeadlessMigrationIfNeeded()` mirrors the overlay's decision tree — pristine install → stamp; nothing to do → stamp plus `cleanupBackupIfStale()`; otherwise `runIfNeeded()` — and releases the gate from a `defer` on every exit path.
+- `AppDelegate` starts it off the main actor before anything opens SQLite. Off-main matters: `StorageKeyManager.currentKey()` can raise a Keychain prompt, and blocking the main actor on that deadlocks.
+
+**One behavior differs deliberately.** The overlay leaves the gate closed when migration fails so the user can retry from the panel. Headless there is no panel and no one to ask, so a closed gate would strand every subsequent database open for the life of the process. The Intel path latches ready even on failure and lets individual opens fail loudly instead, and `blockingAwaitReady()` carries a 30-second timeout as a backstop.
+
 ---
 
 ## Storage Settings
@@ -172,7 +183,22 @@ Shows the most recent `StorageMigrator` run:
 
 ### Export plaintext backup
 
-Writes a tarball of every encrypted artifact in plaintext to a folder you pick (Downloads by default). Use this **before**:
+Writes a **directory** (not an archive) of decrypted artifacts to a folder you pick, laid out as:
+
+```
+<destination>/
+  databases/<path relative to ~/.osaurus>.plaintext   # one per SQLite database
+  config/<path relative to ~/.osaurus>                # JSON and other artifacts
+  blobs/<sha256>                                      # chat attachment payloads
+  README.txt
+```
+
+Two things to know before you rely on it:
+
+- **It is a one-way forensic dump, not a restorable backup.** There is no import counterpart, and this layout does not map back onto `~/.osaurus` — copying it into place does nothing. To move an install, see [Migrating an install to another Mac](#migrating-an-install-to-another-mac).
+- **It covers the roots listed in `exportPlaintextBackup`, not the whole tree.** `skills/`, `slash-commands/`, `knowledge/`, `projects/` and `generated-images/` are outside it. Those are plaintext on disk already and can simply be copied.
+
+Use this **before**:
 
 - Reinstalling macOS or migrating to a new Mac without a Time Machine restore.
 - Rotating the storage key (the rotate confirmation dialog offers this as a one-click shortcut).
@@ -246,6 +272,26 @@ The ticker is started from [`AppDelegate`](../Packages/OsaurusCore/AppDelegate.s
 | `~/.osaurus/scheduler.sqlite` | SQLCipher cross-agent next-run + pause slots |
 
 The DEK lives in macOS Keychain, **not** in `~/.osaurus/`.
+
+---
+
+## Migrating an install to another Mac
+
+The plaintext export cannot be restored (see above), so moving an install is a manual procedure. With the app quit on both machines:
+
+| What | Where it lives | How it moves |
+|---|---|---|
+| Agents, config, themes, providers, schedules, watchers, skills, slash-commands, knowledge, plugin specs, projects | plain JSON under `~/.osaurus/` | **copy directly.** JSON is not encrypted at rest (storage v2 rolled that back), so no export is involved — and the export would not have contained them. |
+| Long-term memory | `memory/memory.sqlite` (SQLCipher) | export it, place the decrypted file at the same path, then delete `~/.osaurus/.storage-version` so the migrator adopts it and re-encrypts with the destination Mac's key. |
+| Chat history | `chat-history/history.sqlite` (SQLCipher) on Apple Silicon; `sessions/<UUID>.json` on Intel | same-architecture: as for memory. Apple Silicon → Intel: convert with `scripts/migration/history_sqlite_to_sessions_json.py`. |
+| Chat attachments | `chat-history/blobs/` | copy the decrypted blobs back into the same directory. |
+| Identity | iCloud Keychain | Settings → Identity → **Restore from recovery phrase**, using the 24-word phrase. |
+| Storage encryption key | macOS Keychain, never synced | **does not move.** The destination Mac uses its own key; that is why plaintext files plus a cleared version stamp are the transfer mechanism. |
+
+Two failure modes worth avoiding:
+
+- **Do not copy an encrypted database to a Mac whose Keychain lacks the matching key.** It cannot be opened, and it will also break **Rotate storage key**, which verifies the old key against every target and stops on the first one it cannot read.
+- **Do not copy databases the destination build does not implement.** On Intel, `chat-history/history.sqlite`, `methods/`, `tool-index/` and per-agent `db.sqlite` are stubbed; leaving plaintext files at those paths achieves nothing and breaks rotation.
 
 ---
 

@@ -2384,6 +2384,202 @@ So it was a glue port, not a rewrite. Dropped the redundant `OpenAICompatibleStr
 rewired CreditsView's session links to `ChatSessionsManager`. **Genuinely still blocked:**
 p2p e2e (excluded Bonjour/relay transport), local MCP probe (excluded `SandboxStdioRunner`).
 
+## M18 — Air → Rosy data migration: five silent failures on one path (2026-09-08)
+
+Goal was mundane: move an Apple Silicon install's data onto Rosy. It took five
+separate bugs to get there, every one of them **silent** — no error, no log line,
+no banner. That is the through-line of this milestone: the fork (and upstream)
+had a whole migration path where every failure mode was invisible.
+
+### The restore flow that was never wired
+
+`RecoverFromMnemonicSheet` already supported three entry modes — `driftRepair`,
+`freshRestore`, `replaceExisting` — with full copy, address preview and checksum
+validation. Only `driftRepair` was ever presented. The other two were unreachable
+enum cases, so there was no way to bring an identity onto a Mac from Settings.
+
+Tell-tale: the sheet's own strings for those two modes (`"Restore Identity"`,
+`"Replace Identity"`, `"Current identity"`, the acknowledgment toggle) were **not
+in the string catalog**. Dead UI doesn't get localized.
+
+Wired both: a "Restore from recovery phrase" secondary action on the no-identity
+setup card, and a Danger Zone row above Reset that shows current-vs-restored
+addresses behind an explicit acknowledgment. One `.sheet(item:)` now drives all
+three modes.
+
+### The device-attestation trap (the silent bounce)
+
+The one that actually cost the day. `DeviceKey.attest()` was called from exactly
+one place: `OsaurusIdentity.setup()` — the *generate* path. A Mac that received
+its master any other way (mnemonic restore, iCloud Keychain sync) had a valid
+master in Keychain and **no device ID in UserDefaults**, so
+`DeviceKey.currentDeviceId()` threw `deviceNotAttested`, the Identity screen's
+loader caught it as "no identity", and dumped the user back on the setup card
+with no error.
+
+Sticky, too: the master *was* installed, so every relaunch re-ran the same failing
+read. Pressing "Generate Identity" didn't help either — `setup()` short-circuits on
+`MasterKey.exists()` into a path that hit the same throwing call. Cleanly bricked.
+
+`DeviceKey.ensureDeviceId()` now attests on first use, falling back to a software
+device ID when App Attest itself fails (offline, or unrecognized hardware — an
+OCLP Mac is exactly that). Both identity loaders use it, so Macs already stuck in
+this state heal on next launch.
+
+### The plaintext backup that contained no plaintext
+
+**Settings → Storage → "Export plaintext backup"** is recommended in-product
+"before reinstalling macOS or moving Macs". Three defects, all silent:
+
+1. **The config walk only touched `.osec` files.** JSON at-rest encryption was
+   rolled back in storage v2 (`recoverEncryptedJSON` restores `.osec` twins to
+   plaintext; re-enabling is still a follow-up), so a healthy install has **zero**
+   `.osec` files. Verified on a real install: 0 `.osec`, 536 plaintext JSON. Agents,
+   themes, providers, schedules, watchers and config were absent from the backup
+   entirely.
+2. **Blobs had the same filter**, dropping every blob written before that
+   convention.
+3. **Databases were named by bare filename** under `databases/`, so every per-agent
+   `db.sqlite` and every plugin `data.db` collided on one path — last writer won.
+   Confirmed in the wild: two agent DBs on disk, one file in the backup.
+
+Fixed all three. Non-`.osec` files are copied verbatim (SQLite excepted — the
+database half owns those), blobs handle both shapes, and database paths mirror
+their location relative to `~/.osaurus`.
+
+**Still true and worth knowing: the export is a one-way forensic dump.** There is
+no import counterpart, and the layout (`databases/`, `config/`, `blobs/`) does not
+map back onto `~/.osaurus`. Pasting it in does nothing.
+
+### One missing JSON key deleted every agent
+
+Agent JSON copied from the other Mac produced an **empty agent list**.
+`AutonomousExecConfig` has four non-optional fields and used the synthesized
+decoder, so a JSON missing any one of them failed the whole decode.
+`AgentManager.reload()` loads agents with `try?` — so the failure surfaced as the
+agent simply not existing. No error, no log.
+
+The culprit was `commandTimeout`, absent from an Osaurus that predates the field.
+Verified against four real agent files: all four failed on
+`keyNotFound: commandTimeout`, all four load after switching to a field-by-field
+decoder with `AutonomousExecConfig.default` as the per-field fallback.
+
+This is the same bug class the fork already documented at
+`IntelManagerConformers.swift` ("adding a NON-OPTIONAL field here… makes every
+previously-written session silently vanish"). It bit again, in a different type.
+
+### Chat history: the verdict corrected twice
+
+First call: "chat history can never be imported on Intel — `ChatHistoryDatabase`
+is a stub, sessions are in-memory." That was wrong, and it was wrong because the
+**stub's own comment is stale**. It describes the state at the time of the M13
+schedules restore; session persistence was added later (`d2ee63a2`) and Intel has
+persisted chats ever since — as **one JSON file per session** under
+`OsaurusPaths.sessions()`, written by the `ChatSessionsManager` mirror.
+
+So the problem was never "restore persistence". It was **format conversion**:
+upstream stores chats in `chat-history/history.sqlite`, Intel stores them as
+`sessions/<UUID>.json`. Same conversations, two shapes, and no app change needed
+at either end.
+
+Wrote a converter (`scripts/migration/history_sqlite_to_sessions_json.py`) and —
+importantly — **validated it against the fork's own Swift decoder** rather than
+against belief. That validation earned its keep immediately: the first pass
+decoded **165 of 180** sessions. `structuredDocumentMetadata.createdAt` is a Swift
+`Date` decoded with `.iso8601`, but upstream serialized it into the attachment
+blob as a raw epoch **number** — `typeMismatch`, which cascades up through the
+turn and takes the entire conversation with it. Fifteen chats would have gone
+missing with no trace.
+
+After the fix: **180/180 sessions, 8465/8465 turns.**
+
+Contract hazards the converter has to respect, all of which silently drop data:
+
+- Session `id` and every turn's `id` + `role` are hard-required. **One malformed
+  turn fails the whole session.**
+- Dates must be whole-second ISO-8601 (`.iso8601` uses `.withInternetDateTime`;
+  fractional seconds fail to parse). SQLite stores fractional epochs.
+- A missing `agentId` falls back to a **random UUID**, not `Agent.defaultId` — so
+  agent-less sessions (HTTP-sourced ones) scatter differently on every load and
+  never appear in the "all agents" view. Write `Agent.defaultId` explicitly.
+- Unrecognized `source`, `role`, or `Attachment.Kind.type` raw values throw and
+  cascade the same way.
+- `loadFromDisk()` skips undecodable files with **no per-file logging** — only an
+  aggregate count.
+
+### The storage migrator that never ran on Intel
+
+`StorageMigrator` compiles on Intel, but its only caller —
+`Views/Storage/StorageMigrationOverlay.swift` — is entirely `#if !OSAURUS_INTEL`.
+So it never ran: a plaintext database dropped into `~/.osaurus` was never adopted,
+every keyed open against it failed, and `.storage-version` was read by nothing.
+`cleanupBackupIfStale()` also had no caller, so `.pre-encryption-backup/` grew
+without bound.
+
+Symptom in the wild: **Settings → Storage → Rotate** failing with
+`"Key rotation failed: chat history: verify old key"`, walking down the target list
+one plaintext file at a time. Rotation re-keys already-encrypted data; it was never
+going to adopt anything.
+
+Added a headless path. The Intel `StorageMigrationCoordinator` stub becomes a real
+latch (`AtomicBool` fast path + pre-entered `DispatchGroup` — a semaphore's single
+permit would wake only one of the two concurrent waiters), and `AppDelegate` starts
+`runHeadlessMigrationIfNeeded()` off the main actor before anything opens SQLite.
+Off-main is load-bearing: `StorageKeyManager.currentKey()` can raise a Keychain
+prompt.
+
+**Deliberate divergence from Apple Silicon:** that build leaves the gate *closed*
+on failure so its overlay can retry. Headless there is nothing to retry and nobody
+to ask, so a closed gate would strand every future database open. Intel latches
+ready even on failure and lets individual opens fail loudly instead. There is also
+a 30s timeout on the gate so a bug in the runner can never permanently wedge a
+caller.
+
+Only **memory** and **scheduler** have real non-stubbed implementations among the
+migrator's targets on Intel. `databaseTargets()` is deliberately *not* filtered,
+because `StorageExportService.rotateStorageKey` enumerates the same list and does
+run here.
+
+### The working recipe (Apple Silicon → Intel)
+
+1. **Install the Intel build first.** The agent-decode fix is in the binary; without
+   it agents vanish no matter what is on disk.
+2. **Launch once, quit.** Lets the fresh install create its own storage key.
+3. **Copy the plaintext artifacts directly** from the source `~/.osaurus` — agents,
+   config, themes, providers, schedules, watchers, skills, slash-commands,
+   knowledge, PluginSpecs, projects. These are plain JSON; **no export needed**, and
+   the export would not have contained them anyway.
+4. **Convert chat history** with the converter script into `~/.osaurus/sessions/`.
+5. **Copy `memory/memory.sqlite`** and delete `.storage-version`; the headless
+   migrator adopts and re-encrypts it with the target Mac's key on next launch.
+6. **Restore identity** from the 24-word phrase in Settings → Identity.
+
+Do **not** copy `chat-history/history.sqlite`, `methods/`, `tool-index/`, or
+per-agent `db.sqlite` — all stubbed on Intel, and their presence as plaintext is
+what breaks key rotation.
+
+### Findings that also affect upstream (not Intel-specific)
+
+- **Partial migration failure still stamps `.storage-version` as complete**, so a
+  database that failed to migrate stays plaintext and is *never retried*. Only
+  surfaced in Settings → Storage.
+- **A mid-migration crash has no recovery path.** The plaintext lands in
+  `.pre-encryption-backup/`, the original is gone, and no later launch restores it.
+  Narrow window, real data loss.
+- **The export's "Decrypts every artifact under `~/.osaurus`" copy overpromises** —
+  it walks nine roots, not the whole tree. `skills/`, `slash-commands/`,
+  `knowledge/`, `projects/` and `generated-images/` are outside it.
+
+### Loose thread
+
+The **test target has no `OSAURUS_INTEL` define** — only the `OsaurusCore` library
+target does. So any test file wrapped in `#if OSAURUS_INTEL` compiles to nothing,
+silently, with no build error and no skip notice. `Tests/Model/IntelClaudeCodeTests.swift`
+is affected today and passes vacuously. Not fixed here (shared build config,
+unrelated blast radius).
+
+---
+
 ### Current state / next
 - **Latest release:** 1.0.30 (build 31). Branch `intel-fork`, clean (only the M4-only
   `FoundationModelService` experiment dirty — never committed), pushed. Auto-update healthy.
@@ -2393,12 +2589,21 @@ p2p e2e (excluded Bonjour/relay transport), local MCP probe (excluded `SandboxSt
 - **Hosted inference (Osaurus Router): WORKING** — confirmed live on Rosy. The `/v1` path fix (1.0.25) did it.
 - **Synced to upstream:** `9124d696` (0.20.3 + 12 untagged commits). **0 commits behind** — fully
   caught up.
+- **Air → Rosy migration: DONE (2026-09-08)** — agents, themes, config, skills, knowledge,
+  schedules, watchers, identity, **180 chat sessions / 8465 turns**, and long-term memory all
+  live on Rosy. Five silent failures fixed along the way (M18): unwired restore modes, the
+  device-attestation bounce, three export defects, the agent-decode key, and the migrator that
+  never ran on Intel. Converter lives at `scripts/migration/history_sqlite_to_sessions_json.py`.
 - **Open / pending:** **Phase 2 memory** (distillation/episodes/identity/consolidation/search-tool/full
   panel — tasks #24–27); the Settings→**Permissions section Ventura List-spacing** gaps (pre-existing,
   not memory-related); some router models error mid-chat (a few don't stream — provider-specific);
   composer credits-chip (deferred); the deferred `e8bcba8a`
   onboarding model-selection fix + `37a2291b` ToolAvailability (gates the ToolsManagerView hang fix);
-  SQLCipher `hmac` decrypt error in Rosy logs; verify V4 honors `thinking`/`reasoning_effort`.
+  SQLCipher `hmac` decrypt error in Rosy logs; verify V4 honors `thinking`/`reasoning_effort`;
+  **test target lacks the `OSAURUS_INTEL` define** so `#if OSAURUS_INTEL` test files never run
+  (`IntelClaudeCodeTests` passes vacuously today); **partial storage-migration failure still
+  stamps `.storage-version` complete** and is never retried; **mid-migration crash has no
+  restore path** out of `.pre-encryption-backup/` (both also affect upstream).
   **Intentionally unsurfaced (not bugs):** global-proxy settings UI, community-theme gallery,
   sandbox-plugin install-from-URL — the global-proxy batch ported their plumbing but Intel
   amputates these features' UI doors.
