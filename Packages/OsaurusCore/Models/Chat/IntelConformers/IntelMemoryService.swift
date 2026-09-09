@@ -75,7 +75,8 @@ public actor MemoryService {
         agentId: String,
         conversationId: String,
         sessionDate: String? = nil,
-        projectId: UUID? = nil
+        projectId: UUID? = nil,
+        personalMemoryEnabled: Bool = true
     ) async {
         telemetry.attempts += 1
         telemetry.lastAttemptAt = Date()
@@ -104,7 +105,10 @@ public actor MemoryService {
         // (unchanged by this task); this gate governs only whether the
         // buffered content may later be sent to a cloud provider.
         let agentUUID = UUID(uuidString: agentId) ?? Agent.defaultId
-        guard !AgentManager.shared.effectiveDistillationDisabled(for: agentUUID) else {
+        let personalDistillationEnabled = personalMemoryEnabled
+            && !AgentManager.shared.effectiveMemoryDisabled(for: agentUUID)
+            && !AgentManager.shared.effectiveDistillationDisabled(for: agentUUID)
+        guard personalDistillationEnabled || projectId != nil else {
             telemetry.earlyReturnsDisabled += 1
             return
         }
@@ -284,7 +288,11 @@ public actor MemoryService {
         // (not marked processed) so opting back in picks them up, same as
         // the "no model available" skip below.
         let agentUUID = UUID(uuidString: agentId) ?? Agent.defaultId
-        guard !AgentManager.shared.effectiveDistillationDisabled(for: agentUUID) else {
+        let projectId = await projectId(for: conversationId)
+        let personalDistillationEnabled =
+            !AgentManager.shared.effectiveMemoryDisabled(for: agentUUID)
+            && !AgentManager.shared.effectiveDistillationDisabled(for: agentUUID)
+        guard personalDistillationEnabled || projectId != nil else {
             MemoryLogger.service.info(
                 "distill: skipping \(conversationId) — distillation not opted in for agent \(agentId)"
             )
@@ -405,35 +413,51 @@ public actor MemoryService {
             )
 
             let episodeId: Int
-            do {
-                episodeId = try db.insertEpisodeAndMarkProcessed(ep)
-            } catch {
-                MemoryLogger.service.error("distill: failed to insert episode for \(conversationId): \(error)")
+            let storedPinned: Int
+            if personalDistillationEnabled {
+                do {
+                    episodeId = try db.insertEpisodeAndMarkProcessed(ep)
+                } catch {
+                    MemoryLogger.service.error(
+                        "distill: failed to insert episode for \(conversationId): \(error)")
+                    return
+                }
+
+                var stored = ep
+                stored.id = episodeId
+                await MemorySearchService.shared.indexEpisode(stored)
+                storedPinned = await persistPinnedCandidates(
+                    parsed.pinnedCandidates, agentId: agentId, episodeId: episodeId)
+
+                await mirrorDistillateToProject(
+                    episode: ep,
+                    pinnedCandidates: parsed.pinnedCandidates,
+                    conversationId: conversationId
+                )
+
+                if !parsed.identityFacts.isEmpty {
+                    applyIdentityDelta(facts: parsed.identityFacts, model: model)
+                }
+            } else if let projectId {
+                var projectEpisode = ep
+                projectEpisode.agentId = MemoryNamespace.project(projectId).key
+                do {
+                    episodeId = try db.insertEpisode(projectEpisode)
+                    try db.markSignalsProcessed(conversationId: conversationId)
+                } catch {
+                    MemoryLogger.service.error(
+                        "distill: failed to insert project episode for \(conversationId): \(error)")
+                    return
+                }
+                projectEpisode.id = episodeId
+                await MemorySearchService.shared.indexEpisode(projectEpisode)
+                storedPinned = await persistPinnedCandidates(
+                    parsed.pinnedCandidates,
+                    agentId: projectEpisode.agentId,
+                    episodeId: episodeId
+                )
+            } else {
                 return
-            }
-
-            // Index the episode for semantic recall.
-            var stored = ep
-            stored.id = episodeId
-            await MemorySearchService.shared.indexEpisode(stored)
-
-            // Promote pinned candidates that are explicit, novel, and not already represented.
-            let storedPinned = await persistPinnedCandidates(
-                parsed.pinnedCandidates, agentId: agentId, episodeId: episodeId)
-
-            // Shared project memory (Phase 5): mirror the distilled episode
-            // (and pinned candidates) into the chat's project namespace, so
-            // every chat in the project can recall it too. Additive and
-            // best-effort — never affects the agent-namespace outcome above.
-            await mirrorDistillateToProject(
-                episode: ep,
-                pinnedCandidates: parsed.pinnedCandidates,
-                conversationId: conversationId
-            )
-
-            // Apply identity delta: append new identity-grade facts to overrides.
-            if !parsed.identityFacts.isEmpty {
-                applyIdentityDelta(facts: parsed.identityFacts, model: model)
             }
 
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)

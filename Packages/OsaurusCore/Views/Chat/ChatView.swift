@@ -134,6 +134,11 @@ final class ChatSession: ObservableObject {
     /// `ChatSessionData.projectId`; feeds project instructions into
     /// `composeChatContext` at send time.
     @Published var projectId: UUID?
+    /// Working-folder state owned by this conversation. Folder tools resolve
+    /// this root through the turn's TaskLocal scope, so separate windows do
+    /// not overwrite one another.
+    let folderState = ChatFolderState()
+    nonisolated(unsafe) private var folderStateCancellable: AnyCancellable?
 
     /// Skill ID to inject as one-off context for the next outgoing message.
     /// Set when the user selects a skill from the slash command popup; cleared after send.
@@ -293,6 +298,14 @@ final class ChatSession: ObservableObject {
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
+
+        folderStateCancellable = folderState.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+        folderState.onFolderMutated = { [weak self] in
+            guard let self, !self.turns.isEmpty else { return }
+            self.isDirty = true
+            self.save()
+        }
 
         remoteModelsObserver = NotificationCenter.default.addObserver(
             forName: .remoteProviderModelsChanged,
@@ -480,8 +493,8 @@ final class ChatSession: ObservableObject {
     private func applyEffectiveModel(for agentId: UUID?) {
         isLoadingModel = true
         let effectiveModel = AgentManager.shared.effectiveModel(for: agentId ?? Agent.defaultId)
-        if let model = effectiveModel, pickerItems.contains(where: { $0.id == model }) {
-            selectedModel = model
+        if let model = effectiveModel, let resolved = Self.resolvePickerModel(model, among: pickerItems) {
+            selectedModel = resolved
         } else {
             selectedModel = pickerItems.firstChatCapable?.id
         }
@@ -503,10 +516,10 @@ final class ChatSession: ObservableObject {
         let effectiveModel = AgentManager.shared.effectiveModel(for: agentId ?? Agent.defaultId)
         let newSelected: String?
 
-        if let model = effectiveModel, newOptionIds.contains(model) {
-            newSelected = model
-        } else if let prev = selectedModel, newOptionIds.contains(prev) {
-            newSelected = prev
+        if let model = effectiveModel, let resolved = Self.resolvePickerModel(model, among: newOptions) {
+            newSelected = resolved
+        } else if let prev = selectedModel, let resolved = Self.resolvePickerModel(prev, among: newOptions) {
+            newSelected = resolved
         } else {
             newSelected = newOptions.firstChatCapable?.id
         }
@@ -517,6 +530,17 @@ final class ChatSession: ObservableObject {
         loadActiveModelOptions(for: selectedModel)
         isLoadingModel = false
         hasAnyModel = !newOptions.isEmpty
+    }
+
+    /// Preserve provider ownership in picker ids while accepting old sessions
+    /// that stored a bare model id. A bare id is only upgraded when exactly one
+    /// provider owns it; ambiguous ids must never silently route elsewhere.
+    static func resolvePickerModel(_ preferred: String, among items: [ModelPickerItem]) -> String? {
+        if items.contains(where: { $0.id == preferred }) { return preferred }
+        guard !preferred.contains("/") else { return nil }
+        let suffix = "/\(preferred)"
+        let matches = items.map(\.id).filter { $0.hasSuffix(suffix) }
+        return matches.count == 1 ? matches[0] : nil
     }
 
     /// Check if the currently selected model supports images (VLM)
@@ -734,7 +758,7 @@ final class ChatSession: ObservableObject {
                 PromptSection(id: "persona", label: "Persona", text: previewPrompt, tint: .purple))
         }
         let previewFolderSection = SystemPromptTemplates.folderContext(
-            from: FolderContextService.shared.currentContext)
+            from: folderState.context)
         if !previewFolderSection.isEmpty {
             previewSections.append(
                 PromptSection(id: "grounding", label: "Grounding", text: previewFolderSection, tint: .teal))
@@ -1190,6 +1214,7 @@ final class ChatSession: ObservableObject {
         archived = false
         pinned = false
         projectId = nil
+        folderState.clearFolder()
         isDirty = false
 
         // Reset agent-loop UI state.
@@ -1383,6 +1408,8 @@ final class ChatSession: ObservableObject {
             archived: archived,
             pinned: pinned,
             capabilities: SessionCapability.derive(from: turnData),
+            folderBookmark: folderState.persistedBookmark,
+            folderPath: folderState.persistedPath,
             projectId: projectId
         )
     }
@@ -1433,6 +1460,7 @@ final class ChatSession: ObservableObject {
         archived = data.archived
         pinned = data.pinned
         projectId = data.projectId
+        folderState.restore(bookmark: data.folderBookmark, path: data.folderPath)
 
         // Restore the persisted model when it's still valid; otherwise
         // fall back to the agent's preferred model. `isLoadingModel`
@@ -1462,6 +1490,7 @@ final class ChatSession: ObservableObject {
 
         Task { [weak self] in await self?.refreshContextEstimates() }
     }
+
 
     private func refreshMemoryTokens() async {
         let effectiveAgentId = agentId ?? Agent.defaultId
@@ -1844,7 +1873,7 @@ final class ChatSession: ObservableObject {
     /// off, that wins — folder tools must enter the schema or
     /// `excludedToolNames(.none)` will hide them entirely.
     private func estimatedChatExecutionMode(agentId: UUID) -> ExecutionMode {
-        let folder = FolderContextService.shared.currentContext
+        let folder = folderState.context
         let autonomous = AgentManager.shared.effectiveAutonomousExec(for: agentId)?.enabled == true
         let resolved = ToolRegistry.shared.resolveExecutionMode(
             folderContext: folder,
@@ -1952,7 +1981,7 @@ final class ChatSession: ObservableObject {
         let agentUUID = UUID(uuidString: context.memoryAgentId) ?? Agent.defaultId
         let memoryOff = AgentManager.shared.effectiveMemoryDisabled(for: agentUUID)
 
-        if !memoryOff, context.hasContent, let sid = sessionId {
+        if (!memoryOff || context.projectId != nil), context.hasContent, let sid = sessionId {
             let convId = sid.uuidString
             let aid = context.memoryAgentId
             let chunkIdx = turns.count
@@ -1969,28 +1998,30 @@ final class ChatSession: ObservableObject {
             // already detached.
             Task.detached {
                 let db = MemoryDatabase.shared
-                do {
-                    try db.insertTranscriptTurn(
-                        agentId: aid,
+                if !memoryOff {
+                    do {
+                        try db.insertTranscriptTurn(
+                            agentId: aid,
+                            conversationId: convId,
+                            chunkIndex: userChunkIndex,
+                            role: "user",
+                            content: userContent,
+                            tokenCount: userTokenCount,
+                            title: conversationTitle
+                        )
+                    } catch {
+                        MemoryLogger.database.warning("Failed to insert user transcript turn: \(error)")
+                    }
+                    let userTurn = TranscriptTurn(
                         conversationId: convId,
                         chunkIndex: userChunkIndex,
                         role: "user",
                         content: userContent,
                         tokenCount: userTokenCount,
-                        title: conversationTitle
+                        agentId: aid
                     )
-                } catch {
-                    MemoryLogger.database.warning("Failed to insert user transcript turn: \(error)")
+                    await MemorySearchService.shared.indexTranscriptTurn(userTurn)
                 }
-                let userTurn = TranscriptTurn(
-                    conversationId: convId,
-                    chunkIndex: userChunkIndex,
-                    role: "user",
-                    content: userContent,
-                    tokenCount: userTokenCount,
-                    agentId: aid
-                )
-                await MemorySearchService.shared.indexTranscriptTurn(userTurn)
                 // Project memory (Phase 5): additively mirror the same turn
                 // into the project's shared namespace, on top of the
                 // agent-namespace write above.
@@ -2011,28 +2042,30 @@ final class ChatSession: ObservableObject {
                 let assistantTokenCount = TokenEstimator.estimate(assistantContent)
                 Task.detached {
                     let db = MemoryDatabase.shared
-                    do {
-                        try db.insertTranscriptTurn(
-                            agentId: aid,
+                    if !memoryOff {
+                        do {
+                            try db.insertTranscriptTurn(
+                                agentId: aid,
+                                conversationId: convId,
+                                chunkIndex: chunkIdx,
+                                role: "assistant",
+                                content: assistantContent,
+                                tokenCount: assistantTokenCount,
+                                title: conversationTitle
+                            )
+                        } catch {
+                            MemoryLogger.database.warning("Failed to insert assistant transcript turn: \(error)")
+                        }
+                        let assistantTurn = TranscriptTurn(
                             conversationId: convId,
                             chunkIndex: chunkIdx,
                             role: "assistant",
                             content: assistantContent,
                             tokenCount: assistantTokenCount,
-                            title: conversationTitle
+                            agentId: aid
                         )
-                    } catch {
-                        MemoryLogger.database.warning("Failed to insert assistant transcript turn: \(error)")
+                        await MemorySearchService.shared.indexTranscriptTurn(assistantTurn)
                     }
-                    let assistantTurn = TranscriptTurn(
-                        conversationId: convId,
-                        chunkIndex: chunkIdx,
-                        role: "assistant",
-                        content: assistantContent,
-                        tokenCount: assistantTokenCount,
-                        agentId: aid
-                    )
-                    await MemorySearchService.shared.indexTranscriptTurn(assistantTurn)
                     if let projectId = context.projectId {
                         await MemoryService.shared.mirrorTranscriptToProject(
                             projectId: projectId,
@@ -2048,7 +2081,7 @@ final class ChatSession: ObservableObject {
             }
         }
 
-        if !memoryOff, context.hasContent {
+        if (!memoryOff || context.projectId != nil), context.hasContent {
             let formatter = Self.sessionDateFormatter
             formatter.timeZone = .current
             let today = formatter.string(from: Date())
@@ -2059,7 +2092,8 @@ final class ChatSession: ObservableObject {
                     agentId: context.memoryAgentId,
                     conversationId: context.memoryConversationId,
                     sessionDate: today,
-                    projectId: context.projectId
+                    projectId: context.projectId,
+                    personalMemoryEnabled: !memoryOff
                 )
             }
         }
@@ -2076,7 +2110,7 @@ final class ChatSession: ObservableObject {
             await SandboxToolRegistrar.shared.registerTools(for: agentId)
         }
         return ToolRegistry.shared.resolveExecutionMode(
-            folderContext: FolderContextService.shared.currentContext,
+            folderContext: folderState.context,
             autonomousEnabled: autonomous
         )
     }
@@ -2444,6 +2478,11 @@ final class ChatSession: ObservableObject {
                 } else {
                     cachedSession = nil
                 }
+                // A restored session may still be rebuilding its folder tree.
+                // Wait before composing so the first turn cannot silently run
+                // without its project/chat working folder.
+                _ = await folderState.contextWaitingForRestore()
+                guard isRunActive(runId) else { return }
                 let context = await SystemPromptComposer.composeChatContext(
                     agentId: effectiveAgentId,
                     executionMode: executionMode,
@@ -2455,7 +2494,8 @@ final class ChatSession: ObservableObject {
                     additionalToolNames: cachedSession?.loadedToolNames ?? [],
                     frozenAlwaysLoadedNames: cachedSession?.initialAlwaysLoadedNames,
                     trace: ttftTrace,
-                    projectId: projectId
+                    projectId: projectId,
+                    folderContext: folderState.context
                 )
                 guard isRunActive(runId) else { return }
 
@@ -2684,8 +2724,20 @@ final class ChatSession: ObservableObject {
                     var pendingInvocations: [ServiceToolInvocation] = []
                     do {
                         let streamStartTime = Date()
+                        let responseStream = try await ChatExecutionContext.$currentFolderRoot
+                            .withValue(folderState.rootPath) {
+                                try await ChatExecutionContext.$currentAgentId.withValue(effectiveAgentId) {
+                                    try await ChatExecutionContext.$currentProjectId.withValue(projectId) {
+                                        try await ChatExecutionContext.$currentSessionId.withValue(
+                                            sessionId?.uuidString ?? "draft-\(effectiveAgentId.uuidString)"
+                                        ) {
+                                            try await engine.streamChat(request: req)
+                                        }
+                                    }
+                                }
+                            }
                         let (invocations, finalTurn) = try await processStreamDeltas(
-                            stream: try await engine.streamChat(request: req),
+                            stream: responseStream,
                             assistantTurn: assistantTurn,
                             runId: runId,
                             streamStartTime: streamStartTime,
@@ -2811,14 +2863,18 @@ final class ChatSession: ObservableObject {
                             // brand-new chats still get a todo store entry.
                             let sessionIdForTools =
                                 sessionId?.uuidString ?? "chatwindow-\(ObjectIdentifier(self).hashValue)"
-                            resultText = try await ChatExecutionContext.$currentAgentId.withValue(effectiveAgentId) {
-                                try await ChatExecutionContext.$currentSessionId.withValue(sessionIdForTools) {
-                                    try await ChatExecutionContext.$currentAssistantTurnId.withValue(assistantTurn.id) {
-                                        try await ChatExecutionContext.$currentToolCallId.withValue(callId) {
-                                            try await ToolRegistry.shared.execute(
-                                                name: inv.toolName,
-                                                argumentsJSON: inv.jsonArguments
-                                            )
+                            resultText = try await ChatExecutionContext.$currentFolderRoot.withValue(folderState.rootPath) {
+                                try await ChatExecutionContext.$currentAgentId.withValue(effectiveAgentId) {
+                                    try await ChatExecutionContext.$currentProjectId.withValue(projectId) {
+                                        try await ChatExecutionContext.$currentSessionId.withValue(sessionIdForTools) {
+                                            try await ChatExecutionContext.$currentAssistantTurnId.withValue(assistantTurn.id) {
+                                                try await ChatExecutionContext.$currentToolCallId.withValue(callId) {
+                                                    try await ToolRegistry.shared.execute(
+                                                        name: inv.toolName,
+                                                        argumentsJSON: inv.jsonArguments
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3041,7 +3097,18 @@ final class ChatSession: ObservableObject {
                             self?.rebuildVisibleBlocks()
                         }
 
-                        let stream = try await engine.streamChat(request: finalReq)
+                        let stream = try await ChatExecutionContext.$currentFolderRoot
+                            .withValue(folderState.rootPath) {
+                                try await ChatExecutionContext.$currentAgentId.withValue(effectiveAgentId) {
+                                    try await ChatExecutionContext.$currentProjectId.withValue(projectId) {
+                                        try await ChatExecutionContext.$currentSessionId.withValue(
+                                            sessionId?.uuidString ?? "draft-\(effectiveAgentId.uuidString)"
+                                        ) {
+                                            try await engine.streamChat(request: finalReq)
+                                        }
+                                    }
+                                }
+                            }
                         for try await delta in stream {
                             if !isRunActive(runId) { break }
                             if !delta.isEmpty { processor.receiveDelta(delta) }

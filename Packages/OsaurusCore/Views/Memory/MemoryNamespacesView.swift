@@ -46,12 +46,14 @@
         /// ("Agents (n)") can count every row this tab actually shows —
         /// see `MemoryView.swift`'s `HeaderTabsRow` call.
         var onRowCountChanged: ((Int) -> Void)? = nil
+        /// Reports preview requests to the parent MemoryView, which owns the
+        /// sheet presentation.
+        var onPreviewContext: ((String) -> Void)? = nil
 
         @State private var defaultAgentCount: Int = 0
         @State private var agentRows: [(agent: Agent, count: Int)] = []
         @State private var projectRows: [ProjectRow] = []
         @State private var loadError: String?
-        @State private var contextPreviewItem: ContextPreviewItem?
         @State private var detailAgent: Agent?
 
         /// One shared-project namespace and how much it holds. `name` is
@@ -86,10 +88,6 @@
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(theme.primaryBackground)
             .onAppear { reload() }
-            .sheet(item: $contextPreviewItem) { item in
-                ContextPreviewSheet(context: item.text)
-                    .frame(minWidth: 560, minHeight: 420)
-            }
             .sheet(item: $detailAgent) { agent in
                 AgentDetailView(
                     agent: agent,
@@ -131,7 +129,9 @@
                                 agent: pair.agent,
                                 count: pair.count,
                                 onSelect: { detailAgent = pair.agent },
-                                onPreviewContext: { presentPreview(forKey: pair.agent.id.uuidString) }
+                                onPreviewContext: {
+                                    onPreviewContext?(pair.agent.id.uuidString)
+                                }
                             )
                         }
                     }
@@ -172,7 +172,7 @@
                 }
 
                 Button {
-                    presentPreview(forKey: Agent.defaultId.uuidString)
+                    onPreviewContext?(Agent.defaultId.uuidString)
                 } label: {
                     Image(systemName: "eye")
                         .font(.system(size: 11, weight: .medium))
@@ -227,7 +227,7 @@
                         MemoryProjectRow(
                             name: row.name,
                             count: row.count,
-                            onPreviewContext: { presentPreview(forKey: row.namespaceKey) },
+                            onPreviewContext: { onPreviewContext?(row.namespaceKey) },
                             onForget: { confirmForget(key: row.namespaceKey, label: row.name ?? row.namespaceKey, count: row.count) }
                         )
                     }
@@ -236,13 +236,6 @@
         }
 
         // MARK: - Actions
-
-        private func presentPreview(forKey key: String) {
-            Task.detached {
-                let text = memoryPreview(forNamespaceKey: key)
-                await MainActor.run { contextPreviewItem = ContextPreviewItem(text: text) }
-            }
-        }
 
         /// Forgetting a namespace deletes rows permanently, so it confirms
         /// first and names what is going, matching the Danger Zone's shape.

@@ -100,6 +100,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
 
         DocumentAdaptersBootstrap.registerBuiltIns()
 
+        #if OSAURUS_INTEL
+            // Register and refresh the managed Osaurus Router on every launch.
+            // `RemoteProviderManager.refreshAllModels()` can only refresh an
+            // already-present provider, so fresh/restored identities otherwise
+            // showed every custom provider while silently omitting Osaurus.
+            Task { @MainActor in
+                await RemoteProviderManager.shared.connectOsaurusRouterIfPossible()
+            }
+        #endif
+
         Task.detached(priority: .background) {
             await StorageMaintenance.shared.start()
         }
@@ -124,6 +134,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         // full pass runs on every launch.
         Task.detached(priority: .background) {
             await MemoryConsolidator.shared.start()
+        }
+
+        // Knowledge metadata is cheap to load; indexing remains background
+        // actor work. This also makes copied collection registries immediately
+        // useful on Rosy after migration without requiring the user to open
+        // Management first.
+        Task { @MainActor in
+            await KnowledgeManager.shared.ensureLoaded()
+            KnowledgeManager.shared.scheduleIndexAll()
         }
         #endif
 
@@ -363,17 +382,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
     // MARK: - Terminate
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        NSApp.reply(toApplicationShouldTerminate: true)
+        Task { @MainActor in
+            await ClaudeCodeProcessRegistry.shared.terminateAll()
+            await MCPBridge.shared.stop()
+            await server.stop()
+            SharedConfigurationService.shared.remove()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
         return .terminateLater
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         NSLog("Osaurus (Intel) terminating")
-        Task { @MainActor in
-            await ClaudeCodeProcessRegistry.shared.terminateAll()
-            await MCPBridge.shared.stop()
-            await server.stop()
-        }
         SharedConfigurationService.shared.remove()
     }
 

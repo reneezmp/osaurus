@@ -132,26 +132,26 @@ Projects section in the Agents tab. No migration required.
 
 ---
 
-## 3b. Backlog (raised during testing, not yet scheduled)
+## 3b. Follow-ups raised during testing
 
 - **Chat export on Intel.** Removed from both menus in 1.0.34 because
   `ChatSessionExportCoordinator` and `ExportChooserSheet` are excluded, so it
   could never work. Owner wants it back — that means an Intel export path, not
   just restoring the menu entry.
-- **Upstream's fuller project page.** This fork's project page is a
-  single-column instructions + chat list. Upstream's is a richer two-column
-  layout; port it, minus the amputated Knowledge dimension.
+- **Completed 2026-09-08 — upstream's fuller project page.** The Intel page now
+  uses the richer two-column layout and includes Knowledge, a per-project
+  default agent, a working folder, and shared-memory preview/deep-link.
 - **Memories console gaps** (from the Phase 4 port, each needs a
   `MemoryDatabase` change first): per-row disable — nothing here ever writes a
   status other than `active`; per-turn transcript forget — only
   `deleteTranscriptForConversation` exists; the storage-health panel — no public
   schema-version accessor; the context preview's query field — the Intel
   assembler takes no query by construction.
-- **Per-agent recall scoping.** Recall passes `agentId: nil`, so every agent
-  recalls every other agent's memories. Deliberate and documented, but worth
-  revisiting now that project scoping exists.
-- **Should an opted-out agent still feed its project's pool?** Upstream says
-  yes. Deliberately not ported — it is a values question, not a code one.
+- **Completed 2026-09-08 — per-agent recall scoping.** Personal recall now
+  passes the active agent id; the project namespace remains an additive lane.
+- **Completed 2026-09-08 — project learning under personal opt-out.** A project
+  chat continues to mirror transcripts and distill into the project namespace
+  while suppressing writes to that agent's personal namespace.
 
 ---
 
@@ -448,5 +448,23 @@ blocking.
   (defaults, decode-with-missing-key, clamps). Note that suite is in
   `Package.swift`'s `exclude:` list, so the expectations document rather than
   gate until that suite is re-enabled.
+
+---
+
+## 2026-09-09 — Rosy project-memory acceptance note
+
+Rosy confirmed that project transcripts appear immediately under **Recent
+Notes**. **Stored Memory** is the distilled layer and intentionally arrives only
+after the configured session-end debounce (60 seconds by default), a chat
+switch/close flush, or the explicit **Distill pending** action. Merely opening a
+preview must remain read-only because distillation can use a paid cloud model.
+
+The same acceptance pass exposed why distillation could remain empty even after
+the delay: Intel's picker discarded provider ownership while agent and memory
+configuration retained `provider/model` ids. The provider-qualified routing fix
+now keeps duplicate model ids distinct and sends only the bare id to the selected
+provider. This repair serves ordinary chat and memory distillation through the
+same path; pending signals remain recoverable when a provider is temporarily
+unavailable.
 - Fresh Rosy deploy zip built and round-trip verified (symlinks + signature
   intact after unzip).

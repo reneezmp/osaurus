@@ -7,6 +7,7 @@
 
 import AppKit
 import Foundation
+import os
 
 public enum OpenAICodexOAuthError: LocalizedError, Sendable {
     case invalidAuthorizationCallback
@@ -69,7 +70,27 @@ public enum OpenAICodexOAuthService {
     public static let scope = "openid profile email offline_access"
     public static let codexBaseHost = "chatgpt.com"
     public static let codexBasePath = "/backend-api"
-    public static let modelsURL = URL(string: "https://\(codexBaseHost)\(codexBasePath)/models")!
+    public static let codexAPIBasePath = "\(codexBasePath)/codex"
+    public static let modelsURL = URL(string: "https://\(codexBaseHost)\(codexAPIBasePath)/models")!
+    public static let codexClientVersion = "0.144.1"
+
+    private static let responsesLiteModels = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+
+    public static func usesResponsesLite(modelId: String) -> Bool {
+        responsesLiteModels.withLock { $0.contains(modelId) }
+    }
+
+    public static func codexUserAgent() -> String {
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        #if arch(arm64)
+            let arch = "arm64"
+        #elseif arch(x86_64)
+            let arch = "x86_64"
+        #else
+            let arch = "unknown"
+        #endif
+        return "codex_cli_rs/\(codexClientVersion) (Mac OS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion); \(arch)) unknown"
+    }
 
     // MARK: - Provider Factory
 
@@ -142,7 +163,7 @@ public enum OpenAICodexOAuthService {
     ) async throws -> [String] {
         var components = URLComponents(url: modelsURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
-            URLQueryItem(name: "client_version", value: clientVersion())
+            URLQueryItem(name: "client_version", value: codexClientVersion)
         ]
 
         var request = URLRequest(url: components.url!)
@@ -152,6 +173,7 @@ public enum OpenAICodexOAuthService {
         request.setValue(tokens.accountId, forHTTPHeaderField: "chatgpt-account-id")
         request.setValue("codex_cli_rs", forHTTPHeaderField: "originator")
         request.setValue("responses=experimental", forHTTPHeaderField: "OpenAI-Beta")
+        request.setValue(codexUserAgent(), forHTTPHeaderField: "User-Agent")
 
         let data = try await performRequest(request, operation: .modelCatalog)
         guard let decoded = try? JSONDecoder().decode(ModelsResponse.self, from: data) else {
@@ -159,11 +181,13 @@ public enum OpenAICodexOAuthService {
             throw OpenAICodexOAuthError.modelCatalogDecodeFailed(preview)
         }
 
-        return decoded.models
+        let compatible = decoded.models
             .filter(isCodexCompatible)
             .sorted { ($0.priority ?? .max) < ($1.priority ?? .max) }
-            .map(\.slug)
-            .uniqued()
+        responsesLiteModels.withLock { state in
+            state = Set(compatible.filter { $0.use_responses_lite == true }.map(\.slug))
+        }
+        return compatible.map(\.slug).uniqued()
     }
 
     /// True when a `/models` entry can be used through the Codex Responses
@@ -307,17 +331,6 @@ public enum OpenAICodexOAuthService {
 
     // MARK: - Internals
 
-    /// `client_version` query parameter sent to the Codex `/models` endpoint.
-    /// Mirrors what the Codex CLI does (it sends its own crate version) so the
-    /// backend can gate model availability per client.
-    private static func clientVersion() -> String {
-        let bundleVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        if let bundleVersion, !bundleVersion.isEmpty {
-            return "osaurus-\(bundleVersion)"
-        }
-        return "0.99.0"
-    }
-
     // MARK: Wire types
 
     private struct ModelsResponse: Decodable {
@@ -329,6 +342,7 @@ public enum OpenAICodexOAuthService {
         let visibility: String?
         let priority: Int?
         let shell_type: String?
+        let use_responses_lite: Bool?
     }
 
     private struct TokenResponse: Decodable {

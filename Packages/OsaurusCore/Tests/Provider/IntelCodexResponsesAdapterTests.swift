@@ -55,6 +55,66 @@ struct IntelCodexResponsesAdapterTests {
         }
     }
 
+    @Test func responsesLiteMovesToolsAndInstructionsIntoInputItems() throws {
+        let payload = try IntelCodexResponsesAdapter.makeRequest(
+            chatCompletions: [
+                "model": "gpt-5.6-luna",
+                "stream": true,
+                "messages": [
+                    ["role": "system", "content": "Be exact."],
+                    ["role": "user", "content": "Hello"],
+                ],
+                "tools": [[
+                    "type": "function",
+                    "function": ["name": "list_knowledge", "parameters": ["type": "object"]],
+                ]],
+            ],
+            responsesLiteSessionId: "0198f2ab-7b38-7a11-88ba-123456789abc"
+        )
+
+        #expect(payload["tools"] == nil)
+        #expect(payload["instructions"] == nil)
+        #expect(payload["tool_choice"] as? String == "auto")
+        #expect(payload["parallel_tool_calls"] as? Bool == false)
+        #expect(payload["prompt_cache_key"] as? String == "0198f2ab-7b38-7a11-88ba-123456789abc")
+        #expect((payload["reasoning"] as? [String: Any])?["context"] as? String == "all_turns")
+        let input = try #require(payload["input"] as? [[String: Any]])
+        #expect(input.map { $0["type"] as? String } == ["additional_tools", "message", "message"])
+        #expect(input[0]["role"] as? String == "developer")
+        #expect(input[1]["role"] as? String == "developer")
+        #expect(input[2]["role"] as? String == "user")
+    }
+
+    @Test func replaysAssistantTextAsOutputAndNewUserTextAsInput() throws {
+        let payload = try IntelCodexResponsesAdapter.makeRequest(
+            chatCompletions: [
+                "model": "gpt-5.6-luna",
+                "messages": [
+                    ["role": "user", "content": "First turn"],
+                    ["role": "assistant", "content": "First answer"],
+                    ["role": "user", "content": "Follow-up"],
+                ],
+            ]
+        )
+        let input = try #require(payload["input"] as? [[String: Any]])
+        let types = input.map { item -> String? in
+            (item["content"] as? [[String: Any]])?.first?["type"] as? String
+        }
+        #expect(input.map { $0["role"] as? String } == ["user", "assistant", "user"])
+        #expect(types == ["input_text", "output_text", "input_text"])
+    }
+
+    @Test func uuidV7HasExpectedVersionAndVariant() {
+        let value = ChatEngine.makeUUIDv7(
+            now: Date(timeIntervalSince1970: 1_750_000_000),
+            randomUUID: UUID(uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF")!
+        )
+        let uuid = UUID(uuidString: value)
+        #expect(uuid != nil)
+        #expect(value.split(separator: "-")[2].first == "7")
+        #expect(["8", "9", "a", "b"].contains(String(value.split(separator: "-")[3].first!)))
+    }
+
     @Test func decodesPartialTextReasoningAndToolMarkersThenPreservesReplayItems() throws {
         var decoder = IntelCodexResponsesSSEDecoder(allowedToolNames: ["files.find"])
         let frames = [
@@ -112,5 +172,22 @@ struct IntelCodexResponsesAdapterTests {
         let emissions = try decoder.append(Data(completed.utf8))
         let final = try decoder.finish()
         #expect(emissions + final.emissions == ["late text"])
+    }
+
+    @Test func acceptsNormalContentAndReasoningLifecycleEvents() throws {
+        var decoder = IntelCodexResponsesSSEDecoder(allowedToolNames: [])
+        let frames = [
+            "data: {\"type\":\"response.reasoning_summary_part.added\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_part.done\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"brief\"}}\n\n",
+            "data: {\"type\":\"response.content_part.added\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+            "data: {\"type\":\"response.output_text.done\",\"output_index\":1,\"content_index\":0,\"text\":\"Hello\"}\n\n",
+            "data: {\"type\":\"response.content_part.done\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"Hello\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"summary\":[]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}]}}\n\n",
+        ]
+        var emissions: [String] = []
+        for frame in frames { emissions += try decoder.append(Data(frame.utf8)) }
+        emissions += try decoder.finish().emissions
+        #expect(emissions == ["Hello"])
     }
 }

@@ -61,6 +61,44 @@ public final class ProjectManager: ObservableObject {
         notify(project.id)
     }
 
+    /// Store the folder inherited by new chats in this project. The Intel app
+    /// is not App-Sandboxed, so its standardized path is sufficient and avoids
+    /// the security-scoped bookmark call that fails on Ventura outside an app
+    /// sandbox. Keep the bookmark field in the model for upstream backup
+    /// compatibility.
+    @discardableResult
+    public func setFolder(_ url: URL, for projectId: UUID) async -> String? {
+        guard var project = project(for: projectId) else { return nil }
+        let path = url.standardizedFileURL.path
+        #if OSAURUS_INTEL
+        project.folderBookmark = nil
+        #else
+        do {
+            project.folderBookmark = try await Task.detached(priority: .userInitiated) {
+                try url.bookmarkData(
+                    options: .withSecurityScope,
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+            }.value
+        } catch {
+            return nil
+        }
+        #endif
+        project.folderPath = path
+        update(project)
+        return path
+    }
+
+    public func clearFolder(for projectId: UUID) {
+        guard var project = project(for: projectId),
+            project.folderBookmark != nil || project.folderPath != nil
+        else { return }
+        project.folderBookmark = nil
+        project.folderPath = nil
+        update(project)
+    }
+
     /// Deletes the project record. Callers should go through
     /// `ChatSessionsManager.shared.deleteProject(id:)` instead so member
     /// sessions get their `projectId` cleared first.

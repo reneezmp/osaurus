@@ -123,6 +123,14 @@ public enum OsaurusPaths {
         root().appendingPathComponent("projects", isDirectory: true)
     }
 
+    /// Intel's per-agent Knowledge grant ledger. The grant list is kept
+    /// separate from the Agent JSON while the Intel Agent model remains a
+    /// compatibility mirror; it is keyed by agent UUID and contains no
+    /// collection content.
+    public static func knowledgeAgentGrantsFile() -> URL {
+        knowledge().appendingPathComponent("agent-grants.json")
+    }
+
     /// Archive directory used by the chat-history SQLite migration to retain
     /// the original per-session JSON files (never deleted).
     public static func sessionsArchive() -> URL {

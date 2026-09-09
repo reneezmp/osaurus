@@ -25,6 +25,27 @@ public enum ChatExecutionContext {
     /// The agent ID whose context is active for the current execution.
     @TaskLocal public static var currentAgentId: UUID?
 
+    /// The project that owns the active chat, when one is selected. Knowledge
+    /// tools union this project's explicitly shared collections with the
+    /// running agent's own grants.
+    @TaskLocal public static var currentProjectId: UUID?
+
+    /// Trusted host-folder root for the chat executing this turn. Folder
+    /// tools resolve this value at call time, which keeps simultaneous chats
+    /// with different folders from cross-routing filesystem operations.
+    @TaskLocal public static var currentFolderRoot: URL?
+
+    /// Knowledge authorization follows a spawned agent when a child run
+    /// temporarily overrides the normal execution agent. The override is
+    /// intentionally separate from `currentAgentId`, which remains the
+    /// identity used by the surrounding chat/runtime bookkeeping.
+    @TaskLocal static var knowledgeGrantAgentIdOverride: UUID?
+
+    /// The agent identity used by Knowledge tools for grant resolution.
+    static var knowledgeAgentId: UUID? {
+        knowledgeGrantAgentIdOverride ?? currentAgentId
+    }
+
     /// Assistant turn dispatching the current tool call. Used by `speak`
     /// to bind TTS playback to the right message bubble
     @TaskLocal public static var currentAssistantTurnId: UUID?

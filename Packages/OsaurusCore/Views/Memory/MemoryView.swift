@@ -1130,6 +1130,7 @@ struct MemoryView: View {
     // counts what the tab shows, not a number this view would otherwise
     // have to re-derive from a database read of its own.
     @State private var agentsTabRowCount: Int = 0
+    @State private var projectContextPreviewItem: ContextPreviewItem?
 
     private var tabCounts: [MemoryTab: Int] {
         [
@@ -1156,7 +1157,10 @@ struct MemoryView: View {
                 case .memories:
                     MemoryConsoleTabContent()
                 case .agents:
-                    MemoryAgentsTabContent(onRowCountChanged: { agentsTabRowCount = $0 })
+                    MemoryAgentsTabContent(
+                        onRowCountChanged: { agentsTabRowCount = $0 },
+                        onPreviewContext: presentContextPreview(forNamespaceKey:)
+                    )
                 case .settings:
                     MemorySettingsTabContent()
                 case .diagnostics:
@@ -1172,6 +1176,7 @@ struct MemoryView: View {
                 hasAppeared = true
             }
             consumePendingSubTabRequest()
+            consumePendingProjectPreview()
             Task { await diagnostics.refresh() }
         }
         // Single-parameter `onChange` — macOS 13 target (the two-parameter
@@ -1180,6 +1185,13 @@ struct MemoryView: View {
         // view is already on screen (`onAppear` alone only fires once).
         .onChange(of: managementState.memorySubTabRequest) { _ in
             consumePendingSubTabRequest()
+        }
+        .onChange(of: managementState.pendingMemoryProjectPreview) { _ in
+            consumePendingProjectPreview()
+        }
+        .sheet(item: $projectContextPreviewItem) { item in
+            ContextPreviewSheet(context: item.text)
+                .frame(minWidth: 560, minHeight: 420)
         }
     }
 
@@ -1193,6 +1205,25 @@ struct MemoryView: View {
         else { return }
         selectedTab = tab
         managementState.memorySubTabRequest = nil
+    }
+
+    /// Consume the project page's one-shot memory request. Intel already has
+    /// namespace-scoped preview rendering; this bridge selects the Agents tab
+    /// and presents that existing sheet instead of rebuilding memory UI here.
+    private func consumePendingProjectPreview() {
+        guard let key = managementState.pendingMemoryProjectPreview else { return }
+        managementState.pendingMemoryProjectPreview = nil
+        selectedTab = .agents
+        presentContextPreview(forNamespaceKey: key)
+    }
+
+    private func presentContextPreview(forNamespaceKey key: String) {
+        Task.detached {
+            let text = memoryPreview(forNamespaceKey: key)
+            await MainActor.run {
+                projectContextPreviewItem = ContextPreviewItem(text: text)
+            }
+        }
     }
 
     private var headerView: some View {

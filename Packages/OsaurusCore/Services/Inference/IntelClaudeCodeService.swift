@@ -9,7 +9,7 @@
 
 import Foundation
 
-/// Runs text-only Claude Code turns through the user's installed CLI.
+/// Runs Claude Code turns through the user's installed CLI.
 /// Authentication remains owned by Claude Code; Osaurus never reads or stores
 /// the subscription credential.
 actor IntelClaudeCodeService {
@@ -27,40 +27,63 @@ actor IntelClaudeCodeService {
         }
 
         let rendered = Self.renderPrompt(messages: request.messages)
-        let systemNote = "Claude Code is connected in text-only mode. Its file, shell, and MCP tools are disabled for this chat."
+        let workingFolder = ChatExecutionContext.currentFolderRoot
+        let mode: ClaudeCodeMode = workingFolder == nil ? .textOnly : .agent
+        let allowedTools = workingFolder == nil
+            ? []
+            : ClaudeCodeConfiguration.allowedTools(allowWrites: true, allowShell: true)
+        let systemNote: String
+        if let workingFolder {
+            systemNote = "Claude Code can inspect and modify the selected working folder at \(workingFolder.path), and run shell commands there. Treat that folder as the workspace root unless the user explicitly asks you to work elsewhere."
+        } else {
+            systemNote = "Claude Code is connected in text-only mode because this chat has no working folder. Select a folder in the chat to enable safe folder browsing."
+        }
         let systemPrompt = [rendered.systemPrompt, systemNote]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
         let arguments = ClaudeCodeConfiguration.arguments(
             model: model,
-            mode: .textOnly,
-            allowedTools: [],
+            mode: mode,
+            allowedTools: allowedTools,
             systemPrompt: systemPrompt
         )
         let events = ClaudeCodeProcessRunner.stream(
             executable: executable,
             arguments: arguments,
             prompt: rendered.prompt,
-            workingDirectory: Self.scratchDirectory()
+            workingDirectory: workingFolder ?? Self.scratchDirectory()
         )
 
         let (stream, continuation) = AsyncThrowingStream<String, Error>.makeStream()
         let producer = Task {
             do {
+                continuation.yield(StreamingToolHint.encode("Claude Code"))
                 for try await event in events {
                     if Task.isCancelled { break }
                     switch event {
                     case .text(let text):
+                        continuation.yield(StreamingToolHint.encode(""))
                         continuation.yield(text)
                     case .reasoning(let text):
                         continuation.yield(StreamingReasoningHint.encode(text))
-                    case .stats, .toolTrace:
-                        break
+                    case .stats(let outputTokens, let tokensPerSecond, let stopReason):
+                        continuation.yield(
+                            StreamingStatsHint.encode(
+                                tokenCount: outputTokens,
+                                tokensPerSecond: tokensPerSecond,
+                                stopReason: stopReason
+                            )
+                        )
+                    case .toolTrace(let trace):
+                        if trace.endRun || trace.phase == "completed" {
+                            continuation.yield(StreamingToolHint.encode(""))
+                        } else if trace.phase == "started" {
+                            continuation.yield(StreamingToolHint.encode(trace.name))
+                        }
                     case .rateLimit(let status, let utilization, _):
-                        if status != "allowed" {
-                            let percent = Int((utilization * 100).rounded())
-                            continuation.finish(throwing: ClaudeCodeError.rateLimited(detail: "Claude Code reported \(status) at \(percent)% utilization."))
+                        if let error = Self.rateLimitError(status: status, utilization: utilization) {
+                            continuation.finish(throwing: error)
                             return
                         }
                     case .failure(let detail):
@@ -78,11 +101,22 @@ actor IntelClaudeCodeService {
         return stream
     }
 
+    nonisolated static func rateLimitError(
+        status: String,
+        utilization: Double
+    ) -> ClaudeCodeError? {
+        guard status != "allowed", status != "allowed_warning" else { return nil }
+        let percent = Int((utilization * 100).rounded())
+        return .rateLimited(
+            detail: "Claude Code reported \(status) at \(percent)% utilization."
+        )
+    }
+
     func completeChat(request: ChatCompletionRequest) async throws -> ChatCompletionResponse {
         let stream = try await streamChat(request: request)
         var content = ""
-        for try await delta in stream where !StreamingToolHint.isSentinel(delta) {
-            content += delta
+        for try await delta in stream {
+            if let visible = Self.visibleTextDelta(delta) { content += visible }
         }
         return ChatCompletionResponse(
             id: "claude-code-\(UUID().uuidString)",
@@ -98,6 +132,14 @@ actor IntelClaudeCodeService {
             ],
             usage: nil
         )
+    }
+
+    nonisolated static func visibleTextDelta(_ delta: String) -> String? {
+        guard !StreamingToolHint.isSentinel(delta),
+            StreamingReasoningHint.decode(delta) == nil,
+            StreamingStatsHint.decode(delta) == nil
+        else { return nil }
+        return delta
     }
 
     struct RenderedPrompt: Equatable {

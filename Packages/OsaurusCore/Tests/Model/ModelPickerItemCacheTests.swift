@@ -25,6 +25,23 @@ import Testing
 @MainActor
 struct ModelPickerItemCacheTests {
 
+    @Test func legacyBareModelOnlyResolvesWhenProviderOwnershipIsUnique() {
+        let providerA = UUID()
+        let providerB = UUID()
+        let one = ModelPickerItem(
+            id: "deepseek/deepseek-v4-pro", displayName: "deepseek-v4-pro",
+            source: .remote(providerName: "DeepSeek", providerId: providerA)
+        )
+        #expect(ChatSession.resolvePickerModel("deepseek-v4-pro", among: [one]) == one.id)
+        #expect(ChatSession.resolvePickerModel(one.id, among: [one]) == one.id)
+
+        let duplicate = ModelPickerItem(
+            id: "osaurus/deepseek-v4-pro", displayName: "deepseek-v4-pro",
+            source: .remote(providerName: "Osaurus", providerId: providerB)
+        )
+        #expect(ChatSession.resolvePickerModel("deepseek-v4-pro", among: [one, duplicate]) == nil)
+    }
+
     /// Hammer the cache from many concurrent tasks. Because the underlying
     /// state (foundation availability, local models, remote providers) does
     /// not change during the test, every concurrent caller MUST observe the

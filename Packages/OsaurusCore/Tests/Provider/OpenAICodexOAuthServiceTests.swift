@@ -91,6 +91,14 @@ struct OpenAICodexOAuthServiceTests {
         }
     }
 
+    @Test func catalogUsesCodexEndpointAndClientIdentity() {
+        #expect(OpenAICodexOAuthService.modelsURL.path == "/backend-api/codex/models")
+        #expect(OpenAICodexOAuthService.codexClientVersion == "0.144.1")
+        let userAgent = OpenAICodexOAuthService.codexUserAgent()
+        #expect(userAgent.hasPrefix("codex_cli_rs/0.144.1 (Mac OS "))
+        #expect(userAgent.hasSuffix(") unknown"))
+    }
+
     private static func makeJWT(payload: [String: Any]) throws -> String {
         let headerData = try JSONSerialization.data(withJSONObject: ["alg": "none"])
         let payloadData = try JSONSerialization.data(withJSONObject: payload)

@@ -6,6 +6,8 @@ The earlier ledgers used **DEFER** for several different judgments: hardware-inc
 
 Of the 73 deferred commits, **58 are technically feasible Intel work**: 1 is now landed, 28 have a useful slice ready for direct porting, and 29 belong on an explicit dependency-ordered roadmap. The remaining 15 are skips because they only serve the removed MLX/local-model runtime, replace an intentionally different Intel subsystem, or add eval-only machinery rather than app behavior.
 
+The live ledgers now show 72 DEFER rows because `eca456c3` was corrected to PORT in the same commit. The 73 count above refers to the pre-correction ledgers: 61 in the 0.24.3 ledger plus 12 in the later ledger.
+
 “Touches excluded files” is no longer a blocker by itself. A future verdict must identify the incompatible behavior, or classify the commit as a hand port / roadmap item. Size and conflict are effort estimates.
 
 | Commit | Corrected verdict | Upstream change | Why |
@@ -88,7 +90,7 @@ Of the 73 deferred commits, **58 are technically feasible Intel work**: 1 is now
 
 1. Finish and validate the Claude Code CLI slice (`eca456c3`).
 2. Re-review the 28 **PORT NEXT** commits by live Intel file overlap; extract narrow patches and tests rather than replaying whole commits.
-3. Implement project working folders, then Knowledge. Those milestones unlock their linked roadmap commits and Claude agent-mode working directories.
+3. **Completed 2026-09-08:** project working folders and Knowledge now ship together with the full project page; folder roots are per-chat and also drive Claude Code's working directory.
 4. Revisit shell/history, delegation/orchestrator, channels, and onboarding as explicit product milestones.
 
 The **SKIP** label means “no useful behavior in this fork,” not “too hard.” If the Intel product later adopts that subsystem, its commits return to the roadmap.

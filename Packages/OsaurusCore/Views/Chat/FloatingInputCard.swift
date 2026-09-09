@@ -58,6 +58,7 @@ struct FloatingInputCard: View {
     var onSendNow: (() -> Void)?
     /// Discard the queued send without sending it. Called by the chip's ×.
     var onCancelQueued: (() -> Void)?
+    @ObservedObject var folderState: ChatFolderState
 
     init(
         text: Binding<String>,
@@ -85,7 +86,8 @@ struct FloatingInputCard: View {
         autoSpeakAssistant: Binding<Bool> = .constant(false),
         queuedSend: Binding<QueuedSend?> = .constant(nil),
         onSendNow: (() -> Void)? = nil,
-        onCancelQueued: (() -> Void)? = nil
+        onCancelQueued: (() -> Void)? = nil,
+        folderState: ChatFolderState? = nil
     ) {
         self._text = text
         self._selectedModel = selectedModel
@@ -113,11 +115,11 @@ struct FloatingInputCard: View {
         self._queuedSend = queuedSend
         self.onSendNow = onSendNow
         self.onCancelQueued = onCancelQueued
+        self._folderState = ObservedObject(wrappedValue: folderState ?? ChatFolderState())
     }
 
     // Observe managers for reactive updates
     @ObservedObject private var agentManager = AgentManager.shared
-    @ObservedObject private var folderContextService = FolderContextService.shared
     @ObservedObject private var sandboxState = SandboxManager.State.shared
     @ObservedObject private var clipboardService = ClipboardService.shared
     @ObservedObject private var appConfig = AppConfiguration.shared
@@ -1856,7 +1858,7 @@ extension FloatingInputCard {
         let agentId = effectiveAgentId
         let manager = agentManager
         let willEnable = newConfig.enabled
-        let folderService = folderContextService
+        let folderService = folderState
         Task {
             // Sandbox and folder backends are mutually exclusive — clear the
             // folder context BEFORE provisioning sandbox so we don't briefly
@@ -1906,7 +1908,7 @@ extension FloatingInputCard {
     private func selectFolderWithSandboxOff() {
         Task {
             await disableSandboxIfEnabled()
-            _ = await folderContextService.selectFolder()
+            _ = await folderState.selectFolder(from: NSApp.keyWindow)
         }
     }
 
@@ -2349,7 +2351,7 @@ extension FloatingInputCard {
     // MARK: - Folder Context Chip
 
     private var folderContextChip: some View {
-        let hasFolder = folderContextService.hasActiveFolder
+        let hasFolder = folderState.hasActiveFolder
 
         return HStack(spacing: 4) {
             Button(action: selectFolderWithSandboxOff) {
@@ -2361,7 +2363,7 @@ extension FloatingInputCard {
             // stable name, value, and identifier to VoiceOver and UI tests.
             .accessibilityLabel(Text("Folder", bundle: .module))
             .accessibilityValue(Text(verbatim: hasFolder
-                ? (folderContextService.currentContext?.rootPath.lastPathComponent ?? "") : ""))
+                ? (folderState.context?.rootPath.lastPathComponent ?? "") : ""))
             .accessibilityIdentifier("composer.folderChip")
             .contextMenu {
                 if hasFolder {
@@ -2375,7 +2377,7 @@ extension FloatingInputCard {
                         }
                     }
                     Button {
-                        Task { await folderContextService.refreshContext() }
+                        Task { await folderState.refreshContext() }
                     } label: {
                         Label {
                             Text("Refresh Context", bundle: .module)
@@ -2385,7 +2387,7 @@ extension FloatingInputCard {
                     }
                     Divider()
                     Button(role: .destructive) {
-                        folderContextService.clearFolder()
+                        folderState.clearFolder()
                     } label: {
                         Label {
                             Text("Clear Folder", bundle: .module)
@@ -2398,7 +2400,7 @@ extension FloatingInputCard {
 
             if hasFolder {
                 Button {
-                    folderContextService.clearFolder()
+                    folderState.clearFolder()
                 } label: {
                     Image(systemName: "xmark")
                         .font(theme.font(size: CGFloat(theme.captionSize) - 4, weight: .bold))
@@ -2423,7 +2425,7 @@ extension FloatingInputCard {
                 .foregroundColor(hasFolder ? theme.accentColor : theme.tertiaryText)
                 .opacity(canEdit ? 1.0 : 0.7)
 
-            if let context = folderContextService.currentContext {
+            if let context = folderState.context {
                 Text(context.rootPath.lastPathComponent)
                     .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
                     .foregroundColor(canEdit ? theme.secondaryText : theme.tertiaryText)

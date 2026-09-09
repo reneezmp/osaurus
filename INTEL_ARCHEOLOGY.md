@@ -2592,13 +2592,13 @@ what breaks key rotation.
   it walks nine roots, not the whole tree. `skills/`, `slash-commands/`,
   `knowledge/`, `projects/` and `generated-images/` are outside it.
 
-### Loose thread
+### Test-target trap
 
 The **test target has no `OSAURUS_INTEL` define** — only the `OsaurusCore` library
-target does. So any test file wrapped in `#if OSAURUS_INTEL` compiles to nothing,
-silently, with no build error and no skip notice. `Tests/Model/IntelClaudeCodeTests.swift`
-is affected today and passes vacuously. Not fixed here (shared build config,
-unrelated blast radius).
+target does. So a test file wrapped in `#if OSAURUS_INTEL` compiles to nothing,
+silently, with no build error and no skip notice. Intel-only tests whose production
+types are available from the library must remain unwrapped. M22 removed the stale
+guard from `IntelClaudeCodeTests` so those checks now execute.
 
 ---
 
@@ -2622,8 +2622,9 @@ unrelated blast radius).
   composer credits-chip (deferred); the deferred `e8bcba8a`
   onboarding model-selection fix + `37a2291b` ToolAvailability (gates the ToolsManagerView hang fix);
   SQLCipher `hmac` decrypt error in Rosy logs; verify V4 honors `thinking`/`reasoning_effort`;
-  **test target lacks the `OSAURUS_INTEL` define** so `#if OSAURUS_INTEL` test files never run
-  (`IntelClaudeCodeTests` passes vacuously today); **partial storage-migration failure still
+  **test target lacks the `OSAURUS_INTEL` define**, so any newly added guarded test file will
+  silently not run (the affected `IntelClaudeCodeTests` guard was removed in M22);
+  **partial storage-migration failure still
   stamps `.storage-version` complete** and is never retried; **mid-migration crash has no
   restore path** out of `.pre-encryption-backup/` (both also affect upstream).
   **Intentionally unsurfaced (not bugs):** global-proxy settings UI, community-theme gallery,
@@ -2631,3 +2632,147 @@ unrelated blast radius).
   amputates these features' UI doors.
 - **Deferred (by choice):** chat-bubble rendering (watch-list); native 1-bit/ternary local
   backend (when the ecosystem matures); louder distribution.
+
+## M19 — Knowledge and full Projects restoration (2026-09-08)
+
+The Intel fork now compiles a local Knowledge registry, encrypted semantic
+index, management surface, and Knowledge tools. Project pages were rebuilt as
+the upstream-style split workspace: chats and search in the main pane;
+instructions, Knowledge grants, working folder, shared memory, and default
+agent in the context pane.
+
+The working-folder port deliberately does not reuse the old process-wide root.
+Each `ChatSession` owns and persists its folder state, while rootless folder
+tools resolve `ChatExecutionContext.currentFolderRoot` at execution time. This
+closes the cross-window routing hazard and gives Claude Code the same active
+directory. Personal recall is scoped to the active agent; project recall stays
+additive, and project learning continues without writing into an opted-out
+personal namespace.
+
+Validation: package build passed; **793 tests in 120 suites** passed, including
+legacy decoding and concurrent per-chat folder isolation. The canonical Rosy
+x86_64 package build passed, and its signed app satisfied its designated
+requirement.
+
+## M20 — Rosy acceptance repairs: owned models, Codex Lite, Knowledge context (2026-09-09)
+
+Rosy's first M19 acceptance pass found several controls that looked complete but
+were connected to the wrong ownership boundary. The model picker globally
+deduplicated bare model ids, so whichever provider appeared first hid every
+later provider carrying the same id. Agent defaults were stored in upstream's
+`provider/model` form, while Intel picker rows used bare ids; the mismatch made
+every agent fall back to the first row (Claude Code Sonnet). Picker ids are now
+provider-qualified, duplicates remain visible under their real provider, legacy
+bare ids resolve only when ownership is unique, and the cloud engine strips the
+prefix before putting the model id on the wire. The managed Osaurus provider is
+also registered and refreshed during launch instead of waiting for the Credits
+page to be opened.
+
+The ChatGPT OAuth catalog bug had two layers. Intel queried
+`/backend-api/models`, the broad ChatGPT web catalog, which exposed experimental
+`*-wm` slugs that `/backend-api/codex/responses` rejects. It now follows the
+upstream Codex contract: `/backend-api/codex/models`, pinned Codex client version
+`0.144.1`, and a Codex CLI-shaped User-Agent. Catalog entries marked
+`use_responses_lite` receive stable UUIDv7 affinity, Lite headers, and the Lite
+developer-item payload shape. Legacy Codex models keep the original Responses
+shape.
+
+Knowledge tools were correctly registered but the engine-owned tool loop had
+only inherited the working-folder TaskLocal. It now inherits the active agent,
+project, session, and folder together, so grant checks can identify the caller.
+Knowledge cards/details now show document and chunk totals and visibly report a
+missing source folder or indexing error. The Memory Agents eye action now
+delegates sheet presentation to the parent Memory view, and the project page's
+two-column breakpoint was lowered for Rosy's usable Ventura window width.
+
+Shared project transcripts are still immediate (`Recent Notes`). `Stored
+Memory` remains deliberately asynchronous: it appears after the one-minute idle
+debounce or when leaving the chat, after a successful distillation call. Opening
+the preview does not trigger a surprise cloud request. Provider-qualified
+routing fixes the model-resolution failure that could previously leave those
+signals pending indefinitely.
+
+Validation: focused acceptance regressions passed (**26 tests / 5 suites**).
+The complete suite passed explicitly serially (**797 tests / 120 suites**). One
+earlier all-at-once run crashed the Swift testing helper with signal 11; the
+Codex fixture suite passed alone, and the explicit serial full rerun passed.
+
+## M21 — Rosy acceptance repairs: Codex lifecycle and chat-window polish (2026-09-09)
+
+Rosy's second M20 acceptance pass confirmed the substantive restoration: agent
+models and provider ownership, Osaurus Router models, Codex catalog filtering,
+Knowledge indexing/search/refresh/folder-loss reporting, project Knowledge,
+working folders, project shared memory, Memory namespace inspection, and the
+two-column project page all worked on the 2017 Intel machine.
+
+The remaining Codex failure happened after valid text had already begun
+streaming. The strict Intel Responses decoder treated
+`response.content_part.done` as an unknown output event, replaced the partial
+answer with an error, and therefore prevented follow-up/cancel/resume testing.
+That event, along with the queued/content-part/reasoning-summary part lifecycle
+markers, is structural protocol bookkeeping. The decoder now accepts those
+known passive markers while continuing to reject unknown event types, unknown
+output items, undisclosed tools, and non-completed terminal states. A fixture
+pins the complete lifecycle around streamed text and a completed response.
+
+Opening a stored conversation could also leave the header showing the
+launch-time Default agent even though inference already used the conversation's
+real agent. Intel's `ChatWindowState.loadSession` now adopts the stored agent
+before publishing the restored session, refreshing the header, agent cache,
+theme, and sidebar filter together. The change is covered by an isolated
+storage test so it cannot touch a developer's real agents.
+
+Two cosmetic Rosy-only defects came from the app shell. The chat content added
+a second 24-point SwiftUI corner mask inside the native rounded window, exposing
+gray wedges at the corners; Intel now trusts the native Ventura window mask and
+keeps the underlying AppKit backing color synchronized with the active theme so
+the antialiased edge cannot reveal a one-pixel gray crescent. The app
+target now launches as a normal application and names `AppIcon` explicitly,
+while `AppDelegate` still applies the user's Hide Dock Icon preference through
+the runtime activation policy. The magnifying glass seen on upstream session
+rows was not a missing control: it is the persisted Search capability badge,
+derived from search tool calls in that conversation.
+
+Validation: the Codex lifecycle suite passed **9 tests**; Intel session
+hydration passed **3 tests**; the complete explicit serial run passed **799
+tests in 120 suites**. The x86_64 package build and canonical signed Rosy app
+build both passed. The final bundle targets macOS 13.0, carries `AppIcon.icns`,
+uses `~/.osaurus`, and satisfies its designated signing requirement.
+
+## M22 — Codex follow-ups and Claude Code folder browsing (2026-09-09)
+
+Rosy's next acceptance pass exposed a role-sensitive Responses rule that a
+single-turn fixture could not catch. The Intel adapter encoded every textual
+message as `input_text`. That is correct for user and developer input, but a
+completed assistant turn must be replayed as `output_text`; on turn two the
+ChatGPT Codex backend rejected the assistant history with `Invalid value:
+'input_text'. Supported values are: 'output_text' and 'refusal'.` The adapter
+now emits `output_text` for assistant history and keeps `input_text` for new
+user input. A three-message regression fixture pins the exact first-answer /
+follow-up shape.
+
+The Claude Code port's text-only behavior was also intentional code rather than
+a CLI failure: it always selected `.textOnly`, passed `--tools ""`, discarded
+decoded tool traces, and injected a system note saying tools were disabled.
+When a chat has an explicitly selected working folder, the Intel service now
+uses Claude's agent mode with the fail-closed `dontAsk` policy and allowlists
+only `Read`, `Grep`, and `Glob`. Chats without a folder remain text-only. The
+CLI still runs with the selected folder as its current directory, and its tool
+activity is translated into the existing transient chat activity chip instead
+of leaving a blank assistant row. Terminal token/rate statistics now reach the
+normal chat telemetry path as well.
+
+After reviewing the read-only build on Rosy, the user explicitly authorized
+Claude Code to use `Edit`, `Write`, `NotebookEdit`, and `Bash` in a selected
+working folder. Folder-backed Claude chats now allowlist those tools alongside
+`Read`, `Grep`, and `Glob` under the same fail-closed `dontAsk` policy. The CLI
+starts in the selected folder and its system note identifies that folder as the
+workspace root. Chats without a selected folder remain text-only.
+
+Validation: focused Codex/Claude/streaming coverage passed **35 tests in 3
+suites** after replacing Intel's empty stats sentinel with the real wire
+format. The complete explicit serial run passed **810 tests in 121 suites**.
+The canonical Rosy x86_64 build passed and the final app satisfied its stable
+designated signing requirement. After the mutation grant, the focused Claude
+suite passed **10 tests**, the complete serial suite remained green at **810
+tests in 121 suites**, and the canonical signed Rosy build passed again.

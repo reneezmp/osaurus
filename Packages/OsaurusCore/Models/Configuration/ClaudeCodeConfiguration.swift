@@ -18,7 +18,7 @@ import SwiftUI
 /// How much of Claude Code's own agent loop the caller wants.
 public enum ClaudeCodeMode: String, Codable, Sendable, CaseIterable {
     /// Claude Code runs its own tools and multi-turn loop; Osaurus renders the
-    /// text plus a sanitized read-only tool trace.
+    /// text plus a sanitized tool trace.
     case agent
     /// All built-in tools disabled — the CLI is a plain text generator and
     /// Osaurus's own agent loop runs on top.
@@ -343,6 +343,26 @@ public enum ClaudeCodeConfiguration {
         ExecutableLocator.searchPath(env: env)
     }
 
+    /// A deliberately narrow environment for Claude Code subprocesses.
+    ///
+    /// Claude owns its login under HOME. Provider, gateway, proxy, and cloud
+    /// variables are excluded because inheriting them from a GUI launcher can
+    /// silently change authentication, billing, or the prompt destination.
+    public static func subprocessEnvironment(
+        source: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var environment: [String: String] = [
+            "PATH": ExecutableLocator.searchPath(env: source),
+            "HOME": source["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path,
+        ]
+        for key in ["USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"] {
+            if let value = source[key], !value.isEmpty {
+                environment[key] = value
+            }
+        }
+        return environment
+    }
+
     /// Cheap availability probe: does the binary exist and is it executable?
     ///
     /// Deliberately does *not* spawn `claude --version` — this is called during
@@ -465,7 +485,7 @@ public enum ClaudeCodeConfiguration {
             let result = await ClaudeCodeProcessRunner.capture(
                 executable: executable,
                 arguments: ["--version"],
-                environment: env,
+                environment: subprocessEnvironment(source: env),
                 timeout: timeout
             ),
             result.exitCode == 0,
@@ -486,7 +506,7 @@ public enum ClaudeCodeConfiguration {
         guard let result = await ClaudeCodeProcessRunner.capture(
                 executable: executable,
                 arguments: ["auth", "status", "--json"],
-                environment: env,
+                environment: subprocessEnvironment(source: env),
                 timeout: timeout
             ),
             !result.timedOut
@@ -532,7 +552,7 @@ public enum ClaudeCodeConfiguration {
         _ = await ClaudeCodeProcessRunner.capture(
             executable: executable,
             arguments: ["auth", "login"],
-            environment: env,
+            environment: subprocessEnvironment(source: env),
             timeout: timeout
         )
         return await authStatus(env: env)

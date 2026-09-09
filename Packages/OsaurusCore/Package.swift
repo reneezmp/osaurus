@@ -121,6 +121,9 @@ let package = Package(
                     "-Wno-deprecated-non-prototype",
                 ]),
             ],
+            swiftSettings: [
+                .define("OSAURUS_INTEL")
+            ],
             linkerSettings: [
                 .linkedFramework("Security")
             ]

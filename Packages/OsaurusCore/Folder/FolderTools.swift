@@ -73,6 +73,22 @@ enum FolderToolError: LocalizedError {
 
 /// Shared utilities for folder tools
 enum FolderToolHelpers {
+    /// Runtime tools carry no global folder. Directly constructed test tools
+    /// may provide a fixed root; otherwise the executing chat's TaskLocal root
+    /// is authoritative.
+    static func resolveRoot(fixed: URL?) -> URL? {
+        fixed ?? ChatExecutionContext.currentFolderRoot
+    }
+
+    static func requireRoot(fixed: URL?) throws -> URL {
+        guard let root = resolveRoot(fixed: fixed) else {
+            throw FolderToolError.operationFailed(
+                "No working folder is selected for this chat."
+            )
+        }
+        return root
+    }
+
     /// Resolve a tool's `path` argument under the working folder.
     /// Accepts a relative path under root (e.g. `src/app.py`) or an
     /// absolute path that lives inside root (e.g. `/Users/x/proj/src/app.py`
@@ -226,13 +242,14 @@ struct FileTreeTool: OsaurusTool {
         "required": .array([]),
     ])
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -251,10 +268,12 @@ struct FileTreeTool: OsaurusTool {
             throw FolderToolError.directoryNotFound(relativePath)
         }
 
-        return ToolEnvelope.success(tool: name, text: buildTree(targetURL, maxDepth: maxDepth))
+        return ToolEnvelope.success(
+            tool: name,
+            text: buildTree(targetURL, maxDepth: maxDepth, rootPath: rootPath))
     }
 
-    private func buildTree(_ url: URL, maxDepth: Int) -> String {
+    private func buildTree(_ url: URL, maxDepth: Int, rootPath: URL) -> String {
         var result = "./\n"
         var fileCount = 0
         let maxFiles = 300
@@ -338,10 +357,10 @@ struct FileReadTool: OsaurusTool {
         "required": .array([.string("path")]),
     ])
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     /// Maximum characters for file_read output to prevent context window exhaustion.
@@ -363,6 +382,7 @@ struct FileReadTool: OsaurusTool {
     private static let binarySniffBytes = 4096
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -551,13 +571,14 @@ struct FileWriteTool: OsaurusTool, PermissionedTool {
     var requirements: [String] { [] }
     var defaultPermissionPolicy: ToolPermissionPolicy { .auto }
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -665,13 +686,14 @@ struct FileEditTool: OsaurusTool, PermissionedTool {
     var requirements: [String] { [] }
     var defaultPermissionPolicy: ToolPermissionPolicy { .auto }
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -792,13 +814,14 @@ struct FileSearchTool: OsaurusTool {
         "required": .array([.string("pattern")]),
     ])
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -857,14 +880,20 @@ struct FileSearchTool: OsaurusTool {
                 }
 
                 // Search file
-                if let matches = searchFile(fileURL, pattern: pattern, maxResults: maxResults - totalMatches) {
+                if let matches = searchFile(
+                    fileURL, pattern: pattern,
+                    maxResults: maxResults - totalMatches,
+                    rootPath: rootPath
+                ) {
                     results.append(contentsOf: matches)
                     totalMatches += matches.count
                 }
             }
         } else {
             // Search single file
-            if let matches = searchFile(searchURL, pattern: pattern, maxResults: maxResults) {
+            if let matches = searchFile(
+                searchURL, pattern: pattern, maxResults: maxResults, rootPath: rootPath
+            ) {
                 results.append(contentsOf: matches)
                 totalMatches = matches.count
             }
@@ -887,7 +916,9 @@ struct FileSearchTool: OsaurusTool {
         return ToolEnvelope.success(tool: name, text: output)
     }
 
-    private func searchFile(_ url: URL, pattern: String, maxResults: Int) -> [String]? {
+    private func searchFile(
+        _ url: URL, pattern: String, maxResults: Int, rootPath: URL
+    ) -> [String]? {
         guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
 
         let relativePath =
@@ -954,13 +985,14 @@ struct ShellRunTool: OsaurusTool, PermissionedTool {
     /// `timeout` (idle ceiling) as the safety net.
     var bypassRegistryTimeout: Bool { true }
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -1254,13 +1286,14 @@ struct GitStatusTool: OsaurusTool {
         "required": .array([]),
     ])
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let (output, exitCode) = try await FolderToolHelpers.runGitCommand(
             arguments: ["status"],
             in: rootPath
@@ -1303,13 +1336,14 @@ struct GitDiffTool: OsaurusTool {
         "required": .array([]),
     ])
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -1385,13 +1419,14 @@ struct GitCommitTool: OsaurusTool, PermissionedTool {
     var requirements: [String] { ["permission:git"] }
     var defaultPermissionPolicy: ToolPermissionPolicy { .ask }
 
-    private let rootPath: URL
+    private let fixedRootPath: URL?
 
-    init(rootPath: URL) {
-        self.rootPath = rootPath
+    init(rootPath: URL? = nil) {
+        self.fixedRootPath = rootPath
     }
 
     func execute(argumentsJSON: String) async throws -> String {
+        let rootPath = try FolderToolHelpers.requireRoot(fixed: fixedRootPath)
         let argsReq = requireArgumentsDictionary(argumentsJSON, tool: name)
         guard case .value(let args) = argsReq else { return argsReq.failureEnvelope ?? "" }
 
@@ -1465,7 +1500,7 @@ enum FolderToolFactory {
     /// matches the schema. Multi-step orchestration goes through
     /// `shell_run` chains or — when the chat is sandbox-mode —
     /// `sandbox_execute_code`.
-    static func buildCoreTools(rootPath: URL) -> [OsaurusTool] {
+    static func buildCoreTools(rootPath: URL? = nil) -> [OsaurusTool] {
         return [
             FileTreeTool(rootPath: rootPath),
             FileReadTool(rootPath: rootPath),
@@ -1477,7 +1512,7 @@ enum FolderToolFactory {
     }
 
     /// Build git tools. Installed when the working folder is a git repo.
-    static func buildGitTools(rootPath: URL) -> [OsaurusTool] {
+    static func buildGitTools(rootPath: URL? = nil) -> [OsaurusTool] {
         return [
             GitStatusTool(rootPath: rootPath),
             GitDiffTool(rootPath: rootPath),

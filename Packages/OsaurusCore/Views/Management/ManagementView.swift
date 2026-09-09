@@ -188,6 +188,8 @@ private extension ManagementView {
             SkillsView()
         case .commands:
             SlashCommandsView()
+        case .knowledge:
+            KnowledgeView()
         case .memory:
             MemoryView()
         case .schedules:

@@ -2785,6 +2785,12 @@ struct AgentDetailView: View {
                     isOn: $disableMemory
                 )
                 databaseFeatureRow
+                if agent.id != Agent.defaultId {
+                    IntelKnowledgeGrantSection(
+                        agentId: agent.id,
+                        theme: theme
+                    )
+                }
             }
         }
     }
@@ -4926,6 +4932,142 @@ struct AgentDetailView: View {
                 saveIndicator = nil
             }
         }
+    }
+}
+
+// MARK: - Intel Knowledge grants
+
+/// Per-agent Knowledge opt-in and collection allow-list. This is deliberately
+/// rendered in the compiled Intel agent editor rather than hidden behind a
+/// JSON-only setting: the same AgentManager methods are the execution-time
+/// boundary used by `KnowledgeToolScope`.
+@MainActor
+private struct IntelKnowledgeGrantSection: View {
+    @ObservedObject private var agentManager = AgentManager.shared
+    @ObservedObject private var knowledgeManager = KnowledgeManager.shared
+
+    let agentId: UUID
+    let theme: ThemeProtocol
+
+    @State private var enabled = false
+    @State private var selectedIds: Set<UUID> = []
+    @State private var didLoad = false
+
+    private var availableCollections: [KnowledgeCollection] {
+        knowledgeManager.collections.filter(\.isEnabled)
+    }
+
+    var body: some View {
+        AgentDetailSection(title: "Knowledge", icon: "books.vertical") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Allow Knowledge tools", bundle: .module)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+                        Text(
+                            "Lets this agent search and read only the collections selected below.",
+                            bundle: .module
+                        )
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { enabled },
+                            set: { newValue in
+                                enabled = newValue && !selectedIds.isEmpty
+                                persist()
+                            }
+                        )
+                    )
+                    .toggleStyle(SwitchToggleStyle(tint: theme.accentColor))
+                    .labelsHidden()
+                    .disabled(selectedIds.isEmpty)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(theme.inputBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(theme.inputBorder, lineWidth: 1)
+                        )
+                )
+
+                if availableCollections.isEmpty {
+                    Text(
+                        "No enabled Knowledge collections are available yet. Add one in the Knowledge tab first.",
+                        bundle: .module
+                    )
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(availableCollections) { collection in
+                            collectionRow(collection)
+                        }
+                    }
+                }
+            }
+            .onAppear(perform: load)
+            .onChange(of: agentId) { _ in load() }
+        }
+    }
+
+    private func collectionRow(_ collection: KnowledgeCollection) -> some View {
+        let granted = selectedIds.contains(collection.id)
+        return Button {
+            if granted {
+                selectedIds.remove(collection.id)
+            } else {
+                selectedIds.insert(collection.id)
+            }
+            if selectedIds.isEmpty { enabled = false }
+            persist()
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: granted ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundColor(granted ? theme.accentColor : theme.tertiaryText)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(collection.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    if !collection.summary.isEmpty {
+                        Text(collection.summary)
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.tertiaryText)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func load() {
+        selectedIds = Set(agentManager.knowledgeCollectionIds(for: agentId))
+        enabled = agentManager.knowledgeEnabled(for: agentId) && !selectedIds.isEmpty
+        didLoad = true
+    }
+
+    private func persist() {
+        guard didLoad else { return }
+        agentManager.updateKnowledgeSettings(
+            enabled: enabled,
+            collectionIds: Array(selectedIds),
+            for: agentId
+        )
     }
 }
 

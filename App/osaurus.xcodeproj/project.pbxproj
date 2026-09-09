@@ -460,7 +460,6 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Osaurus;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Osaurus plugins may use automation to control other applications on your behalf.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Osaurus plugins may access your calendar to read and create events.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Osaurus plugins may access your calendar to read and create events.";
@@ -521,7 +520,6 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Osaurus;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Osaurus plugins may use automation to control other applications on your behalf.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Osaurus plugins may access your calendar to read and create events.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Osaurus plugins may access your calendar to read and create events.";

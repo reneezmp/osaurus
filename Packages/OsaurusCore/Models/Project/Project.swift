@@ -5,10 +5,8 @@
 //  A user-facing container that groups chat sessions around a topic.
 //  Orthogonal to agents: a project can hold conversations from any agent.
 //
-//  Intel fork note: upstream also carries `knowledgeCollectionIds` here
-//  (Projects group instructions + knowledge + memory). This fork has no
-//  Knowledge base, so that dimension is dropped entirely — Intel Projects
-//  are shared instructions + memory + chat grouping only.
+//  Intel fork note: Knowledge collections are shared by project chats and are
+//  merged with the running agent's own grant list at tool execution time.
 //
 
 import Foundation
@@ -20,11 +18,19 @@ public struct Project: Codable, Identifiable, Sendable, Equatable {
     /// Free-form instructions prepended to the system prompt of every chat
     /// in this project. Empty string means no extra context.
     public var instructions: String
+    /// Knowledge collections shared by chats in this project. Unknown or
+    /// disabled ids are filtered by the Knowledge manager at use time.
+    public var knowledgeCollectionIds: [UUID]
     /// Agent that new chats started from this project's page use. nil (or a
     /// since-deleted agent) → the window's current agent, as before. A
     /// nudge toward one-agent projects, never a restriction: chats from any
     /// agent can still be moved in.
     public var defaultAgentId: UUID?
+    /// Folder inherited by new chats created inside this project. Intel is
+    /// not App-Sandboxed, so `folderPath` is the durable source of truth;
+    /// `folderBookmark` is retained for backup compatibility with upstream.
+    public var folderBookmark: Data?
+    public var folderPath: String?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -32,14 +38,20 @@ public struct Project: Codable, Identifiable, Sendable, Equatable {
         id: UUID = UUID(),
         name: String,
         instructions: String = "",
+        knowledgeCollectionIds: [UUID] = [],
         defaultAgentId: UUID? = nil,
+        folderBookmark: Data? = nil,
+        folderPath: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
         self.id = id
         self.name = name
         self.instructions = instructions
+        self.knowledgeCollectionIds = knowledgeCollectionIds
         self.defaultAgentId = defaultAgentId
+        self.folderBookmark = folderBookmark
+        self.folderPath = folderPath
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -49,12 +61,17 @@ public struct Project: Codable, Identifiable, Sendable, Equatable {
         id = try c.decode(UUID.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         instructions = try c.decodeIfPresent(String.self, forKey: .instructions) ?? ""
+        knowledgeCollectionIds =
+            (try? c.decodeIfPresent([UUID].self, forKey: .knowledgeCollectionIds)) ?? []
         defaultAgentId = try c.decodeIfPresent(UUID.self, forKey: .defaultAgentId)
+        folderBookmark = try c.decodeIfPresent(Data.self, forKey: .folderBookmark)
+        folderPath = try c.decodeIfPresent(String.self, forKey: .folderPath)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, instructions, defaultAgentId, createdAt, updatedAt
+        case id, name, instructions, knowledgeCollectionIds, defaultAgentId
+        case folderBookmark, folderPath, createdAt, updatedAt
     }
 }

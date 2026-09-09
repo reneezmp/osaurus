@@ -10,6 +10,30 @@
 
 ---
 
+## Post-sync restoration: Knowledge and the full Project page (2026-09-08)
+
+The two deferrals recorded below are now resolved. Intel Knowledge is a real,
+local collection registry and encrypted semantic index, backed by the same
+pure-Swift embedding path already proven by Memory. Projects now expose the
+upstream-style split page with shared instructions, selectable Knowledge
+collections, a default agent, shared memory preview/deep-link, and a working
+folder inherited by new chats.
+
+Working folders are owned by each chat, persisted in its session JSON, and
+resolved through a task-local root during tool execution. This matters for
+multi-window safety: choosing a folder in one chat cannot silently redirect
+another chat's file tools. Claude Code also receives the active chat folder as
+its process working directory. Project recall is additive to agent-scoped
+personal recall; project transcripts and distilled episodes continue to build
+when personal memory is disabled for that agent.
+
+Validation at this checkpoint: the package build passed, and **793 tests in
+120 suites** passed, including concurrent working-folder isolation and legacy
+project/session decoding. The signed canonical x86_64 Rosy workspace build also
+passed and produced the deployable app.
+
+---
+
 ## Sync 0.24.3 → 0.24.7 (2026-09-07)
 
 **Range:** `4528b56f..7e109ade` — **53 commits**. Deterministic exclusion triage produced
@@ -25,10 +49,11 @@ estimation; and the lock-backed tool-configuration quit drain. The CLI launch fa
 also now waits for the application process instead of mistaking cold server startup for
 a failed launch.
 
-**Deferred deliberately:** project folders need per-chat folder ownership before they can
-be safe on Intel; clickable Knowledge links and Knowledge paging wait for the local-first
-Knowledge milestone; the browser-tab/history shell is a larger reconciliation with the
-Intel Projects and toolbar structure. Local vMLX/MTP, local-model residency, upstream
+**Deferred at this checkpoint (subsequently resolved above):** project folders needed
+per-chat folder ownership before they could be safe on Intel, and clickable Knowledge
+links waited for the local-first Knowledge milestone. The browser-tab/history shell is a
+larger reconciliation with the Intel Projects and toolbar structure. Local vMLX/MTP,
+local-model residency, upstream
 agent-loop/delegation, sandbox, skill mutation, and upstream appcast changes remain skips.
 
 As in the previous sync, every useful change was hand-ported. No upstream commit was
@@ -511,3 +536,20 @@ Fix every "only available in macOS 14/15" error, rebuild, repeat until clean.
 - Verified current Anthropic requirements support macOS 13 and x64. The setup screen uses the current native installer and discovers its `~/.local/bin/claude` launcher.
 - Re-audited all 73 historical `DEFER` rows. The authoritative correction is `docs/DEFER_FEASIBILITY_AUDIT_2026-09-08.md`: 58 are feasible Intel work (1 landed, 28 port-next, 29 roadmap); 15 are product/runtime skips. Difficulty and mixed-file scope are no longer accepted as incompatibility reasons.
 - Validation at this checkpoint: package build passes; 730 tests / 108 suites pass, including 21 Claude configuration/streaming tests. x86_64 and workspace gates follow after commit-ready review.
+
+## 2026-09-09 — Codex catalog and Responses Lite follow-up
+
+Rosy acceptance exposed the exact failure fixed upstream by `7d7df287` and
+`7bdb440f`: querying ChatGPT's generic model catalog admits unusable `*-wm`
+experiments, while current GPT-5.6 Codex models may require the catalog-driven
+Responses Lite contract. The Intel engine now carries both fixes without
+un-excluding the Apple-Silicon service cone: Codex catalog URL/client identity,
+CLI User-Agent, `use_responses_lite` capability tracking, UUIDv7 affinity,
+required Lite headers, and the Lite input-item rewrite live in the Intel OAuth,
+adapter, and cloud-engine files.
+
+This checkpoint also restores upstream's provider-qualified model identity.
+Bare ids remain a compatibility input only when one provider owns them; the
+wire request always receives the owner's bare model id. Do not reintroduce
+global bare-id deduplication in future sync conflict resolution—it hides Router
+models and breaks persisted per-agent defaults.

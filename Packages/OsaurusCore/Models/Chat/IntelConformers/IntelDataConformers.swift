@@ -1072,8 +1072,48 @@ public struct ThemeShareOutcome: Sendable {
 // Intel duplicate that used to live here has been removed.
 
 enum StreamingStatsHint: Sendable {
-    static func encode(tokenCount: Int, tokensPerSecond: Double, unclosedReasoning: Bool = false, stopReason: String? = nil) -> String { "" }
-    static func decode(_ delta: String) -> (tokenCount: Int, tokensPerSecond: Double, unclosedReasoning: Bool, stopReason: String?)? { nil }
+    private static let statsPrefix = "\u{FFFE}stats:"
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+
+    static func encode(
+        tokenCount: Int,
+        tokensPerSecond: Double,
+        unclosedReasoning: Bool = false,
+        stopReason: String? = nil
+    ) -> String {
+        let tps = String(format: "%.4f", locale: posixLocale, tokensPerSecond)
+        var flags: [String] = []
+        if unclosedReasoning { flags.append("unclosed") }
+        if let stopReason = stopReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !stopReason.isEmpty
+        {
+            flags.append("stop=\(stopReason)")
+        }
+        let suffix = flags.isEmpty ? "" : ";\(flags.joined(separator: ","))"
+        return "\(statsPrefix)\(tokenCount);\(tps)\(suffix)"
+    }
+
+    static func decode(
+        _ delta: String
+    ) -> (
+        tokenCount: Int,
+        tokensPerSecond: Double,
+        unclosedReasoning: Bool,
+        stopReason: String?
+    )? {
+        guard delta.hasPrefix(statsPrefix) else { return nil }
+        let parts = delta.dropFirst(statsPrefix.count).split(separator: ";", maxSplits: 2)
+        guard parts.count >= 2, let count = Int(parts[0]), let tps = Double(parts[1]) else {
+            return nil
+        }
+        let flags = parts.count == 3 ? parts[2].split(separator: ",") : []
+        let stopReason = flags.compactMap { flag -> String? in
+            guard flag.hasPrefix("stop=") else { return nil }
+            let value = flag.dropFirst("stop=".count)
+            return value.isEmpty ? nil : String(value)
+        }.first
+        return (count, tps, flags.contains("unclosed"), stopReason)
+    }
 }
 
 // M13 Schedules restore: made `public` so the un-excluded DispatchRequest /
@@ -1581,6 +1621,17 @@ enum StreamingReasoningHint: Sendable {
 final class SystemPromptComposer: @unchecked Sendable {
     static let shared = SystemPromptComposer()
     static func composePreviewContext(agentId: Any? = nil, executionMode: Any? = nil, model: String? = nil) -> ComposedContext { ComposedContext() }
+
+    static func folderToolIsVisible(
+        _ name: String,
+        folder: FolderContext?,
+        registeredFolderToolNames: Set<String>
+    ) -> Bool {
+        guard registeredFolderToolNames.contains(name) else { return true }
+        guard let folder else { return false }
+        let gitToolNames: Set<String> = ["git_status", "git_diff", "git_commit"]
+        return folder.isGitRepo || !gitToolNames.contains(name)
+    }
     // M12 Gap 1 follow-up: the real `SystemPromptComposer` is excluded on
     // Intel (it pulls in preflight / memory / tool-resolution machinery that
     // depends on amputated subsystems). Returning an empty `ComposedContext`
@@ -1589,16 +1640,32 @@ final class SystemPromptComposer: @unchecked Sendable {
     // we CAN honor the one thing that matters here: the agent's effective
     // system prompt (custom prompt for custom agents, global config prompt
     // for Default). Memory/tools stay inert, matching the amputated build.
-    static func composeChatContext(agentId: Any? = nil, executionMode: Any? = nil, model: String? = nil, query: String? = nil, messages: [Any] = [], toolsDisabled: Bool = false, cachedPreflight: Any? = nil, additionalToolNames: [String] = [], frozenAlwaysLoadedNames: Any? = nil, trace: Any? = nil, projectId: UUID? = nil) async -> ComposedContext {
+    static func composeChatContext(agentId: Any? = nil, executionMode: Any? = nil, model: String? = nil, query: String? = nil, messages: [Any] = [], toolsDisabled: Bool = false, cachedPreflight: Any? = nil, additionalToolNames: [String] = [], frozenAlwaysLoadedNames: Any? = nil, trace: Any? = nil, projectId: UUID? = nil, folderContext: FolderContext? = nil) async -> ComposedContext {
         let id = (agentId as? UUID) ?? Agent.defaultId
-        let (basePrompt, folder, toolMode, enabledToolNames, folderToolNames) = await MainActor.run {
-            (
-                AgentManager.shared.effectiveSystemPrompt(for: id),
-                FolderContextService.shared.currentContext,
-                AgentManager.shared.effectiveToolSelectionMode(for: id),
-                AgentManager.shared.effectiveEnabledToolNames(for: id),
-                Set(FolderToolManager.shared.folderToolNames)
-            )
+        // Keep these snapshots separate. A single six-element actor-returned
+        // tuple trips a Swift 6 compiler diagnostic-generation bug in the
+        // Intel target once the Knowledge collection types are present.
+        let basePrompt = await MainActor.run {
+            AgentManager.shared.effectiveSystemPrompt(for: id)
+        }
+        let folder = folderContext
+        let toolMode = await MainActor.run {
+            AgentManager.shared.effectiveToolSelectionMode(for: id)
+        }
+        let enabledToolNames = await MainActor.run {
+            AgentManager.shared.effectiveEnabledToolNames(for: id)
+        }
+        let folderToolNames = await MainActor.run {
+            Set(FolderToolManager.shared.folderToolNames)
+        }
+        let knowledgeAllowed = await MainActor.run {
+            let ownKnowledge = AgentManager.shared.effectiveKnowledgeCollections(for: id)
+            let projectKnowledge = projectId.flatMap { projectId in
+                ProjectManager.shared.project(for: projectId)
+            }.map { project in
+                KnowledgeManager.shared.enabledCollections(withIds: project.knowledgeCollectionIds)
+            } ?? []
+            return !ownKnowledge.isEmpty || !projectKnowledge.isEmpty
         }
         // M12 Gap 3: when a working folder is mounted, append the real
         // "## Working Directory" framing (SystemPromptTemplates.folderContext —
@@ -1653,6 +1720,17 @@ final class SystemPromptComposer: @unchecked Sendable {
             tools = []
         } else {
             let allSpecs = ToolRegistry.shared.openAISpecs()
+                .filter {
+                    knowledgeAllowed || !["list_knowledge", "read_knowledge", "search_knowledge"]
+                        .contains($0.function.name)
+                }
+                .filter { spec in
+                    folderToolIsVisible(
+                        spec.function.name,
+                        folder: folder,
+                        registeredFolderToolNames: folderToolNames
+                    )
+                }
             if toolMode == .manual, let enabled = enabledToolNames {
                 // Folder/runtime tools (file_read, file_write, file_edit,
                 // file_search, file_tree, shell_run, git_*) are auto-mounted with
@@ -1695,10 +1773,6 @@ final class SystemPromptComposer: @unchecked Sendable {
         var memorySection: String? = nil
         let memCfg = MemoryConfigurationStore.load()
         if memCfg.enabled, let q = query?.trimmingCharacters(in: .whitespacesAndNewlines), !q.isEmpty {
-            // Search across all agents (agentId: nil) so recall works regardless
-            // of how the transcript/episode agent id was stamped; per-agent
-            // scoping is a later refinement.
-            //
             // `projectId` additionally opens the project's own namespace as a
             // second lane, mirroring upstream: a chat inside a project recalls
             // what the whole project has learned, floored at a share of the
@@ -1706,7 +1780,7 @@ final class SystemPromptComposer: @unchecked Sendable {
             // It is additive — passing nil keeps the previous behaviour exactly.
             let days = memCfg.episodeRetentionDays > 0 ? memCfg.episodeRetentionDays : 3650
             memorySection = await MemorySearchService.shared.recall(
-                query: q, agentId: nil, projectId: projectId, days: days,
+                query: q, agentId: id.uuidString, projectId: projectId, days: days,
                 budgetTokens: memCfg.memoryBudgetTokens)
         }
 

@@ -187,7 +187,7 @@ public enum ClaudeCodeProcessRunner {
     static func capture(
         executable: String,
         arguments: [String],
-        environment: [String: String] = ProcessInfo.processInfo.environment,
+        environment: [String: String] = ClaudeCodeConfiguration.subprocessEnvironment(),
         timeout: TimeInterval
     ) async -> ClaudeCodeCommandResult? {
         let process = Process()
@@ -271,7 +271,7 @@ public enum ClaudeCodeProcessRunner {
         arguments: [String],
         prompt: String,
         workingDirectory: URL,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ClaudeCodeConfiguration.subprocessEnvironment()
     ) -> AsyncThrowingStream<ClaudeCodeStreamEvent, Error> {
         let (stream, continuation) = AsyncThrowingStream<ClaudeCodeStreamEvent, Error>.makeStream()
 

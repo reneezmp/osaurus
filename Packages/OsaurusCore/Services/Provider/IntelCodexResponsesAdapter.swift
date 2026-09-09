@@ -40,7 +40,10 @@ enum IntelCodexResponsesAdapter {
     /// The only supported integration entry point for request conversion.
     /// `chatCompletions` is the dictionary CloudChatEngine already builds for
     /// its OpenAI-compatible path. The returned value is directly JSON-serializable.
-    static func makeRequest(chatCompletions: [String: Any]) throws -> [String: Any] {
+    static func makeRequest(
+        chatCompletions: [String: Any],
+        responsesLiteSessionId: String? = nil
+    ) throws -> [String: Any] {
         let supportedKeys: Set<String> = [
             "model", "messages", "stream", "max_tokens", "max_completion_tokens",
             "tools", "tool_choice", "reasoning_effort", "reasoning",
@@ -81,11 +84,14 @@ enum IntelCodexResponsesAdapter {
                 guard let content else {
                     throw Error.invalidInput("messages[\(messageIndex)] user message needs string content")
                 }
-                input.append(messageItem(role: "user", content: content))
+                input.append(messageItem(role: "user", content: content, contentType: "input_text"))
 
             case "assistant":
                 if let content, !content.isEmpty {
-                    input.append(messageItem(role: "assistant", content: content))
+                    // Completed assistant history is model output. Codex accepts
+                    // `input_text` only for input roles; replaying an assistant
+                    // turn with that tag fails on the first follow-up.
+                    input.append(messageItem(role: "assistant", content: content, contentType: "output_text"))
                 }
                 if let callsValue = message["tool_calls"] {
                     guard let calls = callsValue as? [[String: Any]], !calls.isEmpty else {
@@ -152,11 +158,34 @@ enum IntelCodexResponsesAdapter {
             }
             payload["reasoning"] = codexReasoning
         }
+
+        if let responsesLiteSessionId {
+            let tools = payload["tools"] as? [Any] ?? []
+            var prefix: [[String: Any]] = [
+                ["type": "additional_tools", "role": "developer", "tools": tools]
+            ]
+            if let instructions = payload["instructions"] as? String, !instructions.isEmpty {
+                prefix.append([
+                    "type": "message",
+                    "role": "developer",
+                    "content": [["type": "input_text", "text": instructions]],
+                ])
+            }
+            payload["input"] = prefix + input
+            payload.removeValue(forKey: "tools")
+            payload.removeValue(forKey: "instructions")
+            payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = false
+            payload["prompt_cache_key"] = responsesLiteSessionId
+            var reasoning = payload["reasoning"] as? [String: Any] ?? [:]
+            reasoning["context"] = "all_turns"
+            payload["reasoning"] = reasoning
+        }
         return payload
     }
 
-    private static func messageItem(role: String, content: String) -> [String: Any] {
-        ["type": "message", "role": role, "content": [["type": "input_text", "text": content]]]
+    private static func messageItem(role: String, content: String, contentType: String) -> [String: Any] {
+        ["type": "message", "role": role, "content": [["type": contentType, "text": content]]]
     }
 
     private static func functionCallItem(_ call: [String: Any], messageIndex: Int, callIndex: Int) throws -> [String: Any] {
@@ -410,7 +439,13 @@ struct IntelCodexResponsesSSEDecoder {
             let key = "\(try requiredIndex(event, context: type)):\(try requiredInteger(event, key: "summary_index", context: type))"
             try emitAuthoritative(text, prior: &emittedReasoning[key, default: ""], asReasoning: true, context: type, emissions: &emissions)
 
-        case "response.created", "response.in_progress", "response.content_part.added":
+        case "response.created", "response.in_progress", "response.queued",
+            "response.content_part.added", "response.content_part.done",
+            "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+            // Structural lifecycle markers. Their text is already handled by
+            // the corresponding *.delta/*.done events and validated again in
+            // output_item.done / response.completed. They carry no executable
+            // tool payload of their own.
             break
 
         default:

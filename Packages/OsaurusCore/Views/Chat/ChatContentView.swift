@@ -339,7 +339,8 @@ struct ChatContentView: View {
                                 observedSession?.generateTitleFromSlashCommand()
                             },
                             autoSpeakAssistant: $observedSession.autoSpeakAssistant,
-                            queuedSend: $observedSession.queuedSend
+                            queuedSend: $observedSession.queuedSend,
+                            folderState: observedSession.folderState
                         )
                         .padding(.horizontal, 12)
                         .padding(.bottom, 12)
@@ -364,7 +365,25 @@ struct ChatContentView: View {
             }
         }
         .frame(minWidth: 800, idealWidth: 950, maxWidth: .infinity, minHeight: 575, idealHeight: 610, maxHeight: .infinity)
+        // The native Intel chat window already supplies the real macOS corner
+        // mask. A second SwiftUI mask here cuts the content inward and leaves
+        // the window background visible as gray wedges at all four corners.
+        // Keep the upstream rounded content treatment for Apple Silicon.
+        #if OSAURUS_INTEL
+        .clipShape(Rectangle())
+        #else
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        #endif
+        #if OSAURUS_INTEL
+        // The native frame clips the full-size hosting view at the correct
+        // Ventura window radius. Its default backing color is AppKit gray,
+        // though, and the antialiased edge exposes a one-pixel gray crescent
+        // between that frame and the themed SwiftUI content. Keep the backing
+        // synchronized with the active theme so those edge pixels disappear.
+        .background(
+            IntelChatWindowBackingColor(color: NSColor(theme.primaryBackground))
+        )
+        #endif
         .ignoresSafeArea()
         .onReceive(NotificationCenter.default.publisher(for: .chatOverlayActivated)) { _ in
             focusTrigger &+= 1; isPinnedToBottom = true
@@ -375,9 +394,7 @@ struct ChatContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .chatToolbarSelectRelayAgent)) { _ in }
         .onReceive(NotificationCenter.default.publisher(for: .vadStartNewSession)) { _ in }
         .onAppear {
-            if session.selectedModel == nil {
-                session.selectedModel = "deepseek-v4-pro"
-            }
+            session.applyInitialModelSelection()
             onSetupFindKeyMonitor()
         }
         .onDisappear {
@@ -399,6 +416,42 @@ struct ChatContentView: View {
         }
     }
 }
+
+#if OSAURUS_INTEL
+private struct IntelChatWindowBackingColor: NSViewRepresentable {
+    let color: NSColor
+
+    func makeNSView(context: Context) -> BackingColorView {
+        BackingColorView(color: color)
+    }
+
+    func updateNSView(_ nsView: BackingColorView, context: Context) {
+        nsView.color = color
+        nsView.applyColor()
+    }
+
+    final class BackingColorView: NSView {
+        var color: NSColor
+
+        init(color: NSColor) {
+            self.color = color
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applyColor()
+        }
+
+        func applyColor() {
+            window?.backgroundColor = color
+        }
+    }
+}
+#endif
 
 // Measured heights of the chat chrome, used to give the message thread an explicit
 // height (window − header − composer) so it stops above the composer.

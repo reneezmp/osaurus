@@ -49,7 +49,7 @@ public enum ManagementSection: String, CaseIterable, Identifiable, Sendable {
     public var tabs: [ManagementTab] {
         switch self {
         case .models: [.providers, .credits]
-        case .capabilities: [.tools, .skills, .plugins, .memory, .commands]
+        case .capabilities: [.tools, .skills, .plugins, .knowledge, .memory, .commands]
         case .automation: [.agents, .schedules, .watchers]
         case .developerTools: [.server, .insights]
         case .general: [.settings, .themes, .permissions, .identity, .storage]
@@ -69,6 +69,7 @@ public enum ManagementTab: String, CaseIterable, Identifiable, Sendable {
     case tools
     case skills
     case commands
+    case knowledge
     case memory
     case schedules
     case watchers
@@ -94,6 +95,7 @@ public enum ManagementTab: String, CaseIterable, Identifiable, Sendable {
         case .tools: "wrench.and.screwdriver.fill"
         case .skills: "sparkles"
         case .commands: "command"
+        case .knowledge: "books.vertical.fill"
         case .memory: "brain.head.profile"  // the `.fill` variant is macOS 14+; renders blank on Ventura
         case .schedules: "calendar.badge.clock"
         case .watchers: "eye.fill"
@@ -119,6 +121,7 @@ public enum ManagementTab: String, CaseIterable, Identifiable, Sendable {
         case .tools: L("Tools")
         case .skills: L("Skills")
         case .commands: L("Commands")
+        case .knowledge: L("Knowledge")
         case .memory: L("Memory")
         case .schedules: L("Schedules")
         case .watchers: L("Watchers")

@@ -18,6 +18,16 @@ final class AgentManager: ObservableObject, @unchecked Sendable {
 
     private var defaultModel = "deepseek-v4-pro"
 
+    /// Intel keeps Knowledge grants in a small sidecar until the Intel Agent
+    /// model grows the upstream AgentSettings fields. The sidecar is scoped by
+    /// agent UUID, survives relaunch, and contains only opt-in/grant metadata.
+    private struct IntelKnowledgeGrantRecord: Codable, Sendable {
+        var enabled: Bool = false
+        var collectionIds: [UUID] = []
+    }
+
+    private var knowledgeGrants: [UUID: IntelKnowledgeGrantRecord] = [:]
+
     struct AgentInfo: Identifiable, Sendable {
         let id: UUID
         let name: String
@@ -49,6 +59,7 @@ final class AgentManager: ObservableObject, @unchecked Sendable {
 
     private init() {
         reload()
+        loadKnowledgeGrants()
     }
 
     /// Re-read custom agents from disk and rebuild `agents` (Default
@@ -100,6 +111,71 @@ final class AgentManager: ObservableObject, @unchecked Sendable {
 
     func refresh() { reload() }
 
+    // MARK: - Knowledge grants
+
+    /// Effective Knowledge scope for tool execution. The Default agent keeps
+    /// Intel's current restricted behavior and cannot receive Knowledge
+    /// grants. Custom agents must opt in and are filtered to enabled
+    /// collections by the Knowledge manager at execution time.
+    @MainActor
+    func effectiveKnowledgeCollections(for agentId: UUID) -> [KnowledgeCollection] {
+        guard agentId != Agent.defaultId,
+            let grant = knowledgeGrants[agentId], grant.enabled,
+            !grant.collectionIds.isEmpty
+        else { return [] }
+        return KnowledgeManager.shared.enabledCollections(withIds: grant.collectionIds)
+    }
+
+    @MainActor
+    func knowledgeEnabled(for agentId: UUID) -> Bool {
+        agentId != Agent.defaultId && knowledgeGrants[agentId]?.enabled == true
+    }
+
+    @MainActor
+    func knowledgeCollectionIds(for agentId: UUID) -> [UUID] {
+        guard agentId != Agent.defaultId else { return [] }
+        return knowledgeGrants[agentId]?.collectionIds ?? []
+    }
+
+    /// Persist the complete grant boundary as one atomic update. Empty grants
+    /// automatically disable the feature so the model cannot see Knowledge
+    /// tools without at least one reachable collection.
+    @MainActor
+    func updateKnowledgeSettings(
+        enabled: Bool,
+        collectionIds: [UUID],
+        for agentId: UUID
+    ) {
+        guard agentId != Agent.defaultId else { return }
+        var seen = Set<UUID>()
+        let ids = collectionIds.filter { seen.insert($0).inserted }
+        knowledgeGrants[agentId] = IntelKnowledgeGrantRecord(
+            enabled: enabled && !ids.isEmpty,
+            collectionIds: ids
+        )
+        persistKnowledgeGrants()
+        NotificationCenter.default.post(name: .agentUpdated, object: agentId)
+    }
+
+    private func loadKnowledgeGrants() {
+        guard let data = try? Data(contentsOf: OsaurusPaths.knowledgeAgentGrantsFile()),
+            let decoded = try? JSONDecoder().decode(
+                [UUID: IntelKnowledgeGrantRecord].self,
+                from: data
+            )
+        else { return }
+        knowledgeGrants = decoded
+    }
+
+    private func persistKnowledgeGrants() {
+        let url = OsaurusPaths.knowledgeAgentGrantsFile()
+        OsaurusPaths.ensureExistsSilent(url.deletingLastPathComponent())
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(knowledgeGrants) else { return }
+        try? data.write(to: url, options: [.atomic])
+    }
+
     func setActiveAgent(_ id: UUID) { activeAgentId = id }
 
     func add(_ agent: Agent) {
@@ -129,6 +205,8 @@ final class AgentManager: ObservableObject, @unchecked Sendable {
         }
         let url = OsaurusPaths.agents().appendingPathComponent("\(id.uuidString).json")
         try? FileManager.default.removeItem(at: url)
+        knowledgeGrants.removeValue(forKey: id)
+        persistKnowledgeGrants()
         if activeAgentId == id { activeAgentId = Agent.defaultId }
         reload()
         return AgentDeleteResult(deleted: true)
@@ -503,6 +581,10 @@ final class ModelPickerItemCache: ObservableObject, @unchecked Sendable {
             let manager = RemoteProviderManager.shared
             let providers = manager.configuration.providers.filter { $0.enabled }
             for provider in providers {
+                let prefix = provider.name
+                    .lowercased()
+                    .replacingOccurrences(of: " ", with: "-")
+                    .replacingOccurrences(of: "/", with: "-")
                 // Only the managed Osaurus Router provider gets the venice-priced
                 // catalog metadata. A *direct* provider (e.g. DeepSeek) can share
                 // model ids with the router's proxied catalog, so keying the
@@ -512,15 +594,17 @@ final class ModelPickerItemCache: ObservableObject, @unchecked Sendable {
                 let discovered = manager.providerStates[provider.id]?.discoveredModels ?? []
                 var ids: [String] = []
                 for id in discovered + provider.manualModelIds where !ids.contains(id) { ids.append(id) }
-                for modelId in ids where !seen.contains(modelId) {
-                    seen.insert(modelId)
+                for modelId in ids {
+                    let pickerId = "\(prefix)/\(modelId)"
+                    guard !seen.contains(pickerId) else { continue }
+                    seen.insert(pickerId)
                     // Osaurus Router models carry rich catalog metadata (provider,
                     // pricing, context, vision) — render the enriched row. Other
                     // providers fall back to the bare id + provider name.
                     if isRouter, let metadata = manager.routerModelMetadata[modelId] {
                         out.append(
                             ModelPickerItem.fromOsaurusRouterModel(
-                                id: modelId,
+                                id: pickerId,
                                 providerName: provider.name,
                                 providerId: provider.id,
                                 metadata: metadata
@@ -529,7 +613,7 @@ final class ModelPickerItemCache: ObservableObject, @unchecked Sendable {
                     } else {
                         out.append(
                             ModelPickerItem(
-                                id: modelId,
+                                id: pickerId,
                                 displayName: modelId,
                                 source: .remote(providerName: provider.name, providerId: provider.id),
                                 isVLM: false,
@@ -578,6 +662,11 @@ public struct ChatSessionData: Identifiable, Codable, @unchecked Sendable {
     var selectedModel: String?
     var turns: [ChatTurnData]
     var capabilities: Set<SessionCapability> = []
+    /// Working folder carried by this chat. Intel uses the plain path because
+    /// the app is not sandboxed; the bookmark remains compatible with backups
+    /// produced by upstream builds.
+    var folderBookmark: Data? = nil
+    var folderPath: String? = nil
     /// Project this chat belongs to, if any. Grouping only — orthogonal to
     /// `agentId`. Optional so old on-disk sessions (no key present) decode
     /// to `nil` via synthesized Codable's `decodeIfPresent`.
@@ -598,6 +687,8 @@ public struct ChatSessionData: Identifiable, Codable, @unchecked Sendable {
         archived: Bool = false,
         pinned: Bool = false,
         capabilities: Set<SessionCapability> = [],
+        folderBookmark: Data? = nil,
+        folderPath: String? = nil,
         projectId: UUID? = nil
     ) {
         self.id = id
@@ -614,6 +705,8 @@ public struct ChatSessionData: Identifiable, Codable, @unchecked Sendable {
         self.dispatchTaskId = dispatchTaskId
         self.pinned = pinned
         self.capabilities = capabilities
+        self.folderBookmark = folderBookmark
+        self.folderPath = folderPath
         self.projectId = projectId
     }
 
@@ -645,7 +738,15 @@ public struct ChatSessionData: Identifiable, Codable, @unchecked Sendable {
         turns = try c.decodeIfPresent([ChatTurnData].self, forKey: .turns) ?? []
         capabilities =
             try c.decodeIfPresent(Set<SessionCapability>.self, forKey: .capabilities) ?? []
+        folderBookmark = try c.decodeIfPresent(Data.self, forKey: .folderBookmark)
+        folderPath = try c.decodeIfPresent(String.self, forKey: .folderPath)
         projectId = try c.decodeIfPresent(UUID.self, forKey: .projectId)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, createdAt, updatedAt, agentId, source, sourcePluginId
+        case externalSessionKey, dispatchTaskId, archived, pinned, selectedModel
+        case turns, capabilities, folderBookmark, folderPath, projectId
     }
 
     /// Derive a chat title from the first user message — mirrors the upstream

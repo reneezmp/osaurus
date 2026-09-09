@@ -727,9 +727,6 @@ final class ChatWindowState: ObservableObject {
     }
 
     /// Keep ⌘N in the open project, or in the current session's project.
-    /// Intel has no per-chat folder state, so the upstream project-folder
-    /// default cannot be applied here without overwriting global folder
-    /// context; that slice is deliberately deferred.
     func startNewChatInCurrentProject() {
         let projectID = openProjectId ?? session.projectId
         guard let project = ProjectManager.shared.project(for: projectID) else {
@@ -751,6 +748,12 @@ final class ChatWindowState: ObservableObject {
             startNewChat()
         }
         session.projectId = project.id
+        if !session.folderState.hasActiveFolder {
+            session.folderState.restore(
+                bookmark: project.folderBookmark,
+                path: project.folderPath
+            )
+        }
     }
 
     var isProjectPageVisible: Bool { openProjectId != nil }
@@ -763,6 +766,15 @@ final class ChatWindowState: ObservableObject {
             sessionData,
             stored: ChatSessionsManager.shared.session(for: sessionData.id)
         )
+        // Loading an existing conversation must adopt its agent before the
+        // session publishes restored state. Otherwise the header keeps the
+        // launch-time "Default" agent until the user changes agents manually.
+        if resolved.agentId != agentId {
+            agentId = resolved.agentId
+            AgentManager.shared.setActiveAgent(resolved.agentId)
+            refreshAgents()
+            refreshTheme()
+        }
         session.load(from: resolved)
         refreshSessions()
     }

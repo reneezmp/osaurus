@@ -1126,6 +1126,7 @@ final class ToolRegistry: ObservableObject, @unchecked Sendable {
 
     init() {
         loadPersistedPolicies()
+        registerKnowledgeTools()
     }
 
     func resolveExecutionMode(folderContext: FolderContext?, autonomousEnabled: Bool) -> ExecutionMode { .none }
@@ -1139,6 +1140,22 @@ final class ToolRegistry: ObservableObject, @unchecked Sendable {
     // it's cleared. No sandbox/DB/capability built-ins (those are amputated) —
     // the folder tool suite is the Intel-supported set.
     private var toolsByName: [String: OsaurusTool] = [:]
+
+    /// Knowledge retrieval is a real built-in on Intel. Visibility is gated
+    /// by the agent/project grant scope at prompt composition and again at
+    /// execution time inside each tool; registration itself is global so the
+    /// tool loop can resolve an approved call without per-agent mutation.
+    private func registerKnowledgeTools() {
+        let tools: [OsaurusTool] = [
+            SearchKnowledgeTool(),
+            ReadKnowledgeTool(),
+            ListKnowledgeTool(),
+        ]
+        for tool in tools {
+            toolsByName[tool.name] = tool
+            builtInToolNames.insert(tool.name)
+        }
+    }
 
     /// Register (or overwrite) a tool by name. Used by FolderToolManager.
     func register(_ tool: OsaurusTool) {

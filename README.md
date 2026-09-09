@@ -34,6 +34,8 @@ It was built, in large part, to give one specific 2017 MacBook Retina 12" a seco
 - 🔧 **Tool calling** — built-in tools + an agentic loop, with live "calling…" cards
 - 🧩 **Native x86_64 plugins** — the slim plugin host `dlopen`s real x86_64 dylibs (search, fetch, time, custom RAG, …)
 - 🗂️ **Folder context** — point a chat at a working directory; file tools operate on the real filesystem
+- 📁 **Projects** — group chats with shared instructions, Knowledge collections, a default agent, a working folder, and shared project memory
+- 📚 **Knowledge & memory** — index local reference folders, recall agent-specific history, and share context across every chat in a project
 - ⏰ **Schedules & 👁️ watchers** — automate runs on a timer or on file changes
 - 🎨 **Themes**, 🧑‍🤝‍🧑 **agents**, 🔌 **MCP tools**, and 🆔 **identity sync** (iCloud Keychain)
 - ⌨️ **Global hotkey** to summon the chat window from anywhere
@@ -45,7 +47,6 @@ These depend on arm64-only frameworks and are disabled on Intel:
 - **MLX on-device inference** (Apple's arm64 ML stack) — replaced by any OpenAI-compatible endpoint, cloud or a local llama.cpp/Ollama server
 - **Voice / transcription** (FluidAudio)
 - **Sandbox / containerization** (Apple Containerization) — tools run un-sandboxed (a non-sandboxed app already has full filesystem access)
-- **Local vector index** (VecturaKit) — bring your own embeddings via a plugin
 
 ---
 
@@ -63,6 +64,12 @@ These depend on arm64-only frameworks and are disabled on Intel:
    - **Local** — run a [llama.cpp](https://github.com/ggml-org/llama.cpp) server (or Ollama) and point a provider at `http://localhost:8080/v1` with no key. Its models appear in the chat picker automatically.
 
 Requires an Intel Mac running **macOS 13 (Ventura) or later**. Use a cloud key, a local server, or both side by side.
+
+Provider model names are scoped in the picker (for example,
+`deepseek/deepseek-v4-pro`), so two providers can expose the same underlying id
+without one disappearing or receiving the other's request. ChatGPT sign-in uses
+the Codex catalog and Responses protocol, including Responses Lite when the live
+catalog requires it; no OpenAI API key is needed for that provider.
 
 ---
 

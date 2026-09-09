@@ -90,6 +90,8 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
     private let providerOverride: RemoteProvider?
     private let session: URLSession
     private let credentials: IntelCodexCredentials
+    private var codexResponsesLiteSessionIds: [String: String] = [:]
+    private var codexResponsesLiteSessionOrder: [String] = []
 
     init(
         source: InferenceSource = .httpAPI,
@@ -274,6 +276,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         let url: String
         var headers: [String: String]
         let providerLabel: String
+        let modelId: String
         /// When true, the request body must be EIP-191 wallet-signed via
         /// `OsaurusRouterAuthSigner` (the hosted Osaurus Router uses signed
         /// `x-wallet-*` headers instead of a Bearer key).
@@ -298,6 +301,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
             let path = provider.authType == .openAICodexOAuth ? "/codex/responses" : provider.providerType.chatEndpoint
             guard let url = provider.url(for: path) else { throw EngineError(message: "Invalid provider URL") }
             return ResolvedEndpoint(url: url.absoluteString, headers: [:], providerLabel: provider.name,
+                                    modelId: Self.bareModelId(model, for: provider),
                                     isOsaurusRouter: provider.providerType == .osaurusRouter, provider: provider)
         }
         let providerEndpoint: ResolvedEndpoint? = await MainActor.run {
@@ -305,9 +309,21 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
             let providers = manager.configuration.providers.filter { $0.enabled }
             // Match the selected model against each provider's known ids:
             // live-discovered (`/models` probe) ∪ user-typed `manualModelIds`.
-            let owner = providers.first { provider in
+            let matchingProviders = providers.filter { provider in
                 let discovered = manager.providerStates[provider.id]?.discoveredModels ?? []
-                return discovered.contains(model) || provider.manualModelIds.contains(model)
+                let bare = Self.bareModelId(model, for: provider)
+                return discovered.contains(bare) || provider.manualModelIds.contains(bare)
+            }
+            let owner: RemoteProvider?
+            if model.contains("/") {
+                owner = matchingProviders.first {
+                    model.lowercased().hasPrefix(Self.providerPrefix($0.name) + "/")
+                }
+            } else {
+                // Backward compatibility for old bare-id sessions. Route only
+                // when ownership is unambiguous; duplicate ids stay inert until
+                // the picker saves a provider-qualified id.
+                owner = matchingProviders.count == 1 ? matchingProviders[0] : nil
             }
             // Use the provider's own chat endpoint, not a hardcoded path: the
             // Osaurus Router serves OpenAI-compatible inference under `/v1/...`
@@ -324,6 +340,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                 url: url.absoluteString,
                 headers: [:],
                 providerLabel: owner.name,
+                modelId: Self.bareModelId(model, for: owner),
                 isOsaurusRouter: owner.providerType == .osaurusRouter,
                 provider: owner
             )
@@ -340,8 +357,21 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         return ResolvedEndpoint(
             url: apiBase,
             headers: ["Content-Type": "application/json", "Authorization": "Bearer \(key)"],
-            providerLabel: "DeepSeek"
+            providerLabel: "DeepSeek",
+            modelId: model.split(separator: "/", maxSplits: 1).last.map(String.init) ?? model
         )
+    }
+
+    private nonisolated static func providerPrefix(_ name: String) -> String {
+        name.lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+    }
+
+    private nonisolated static func bareModelId(_ model: String, for provider: RemoteProvider) -> String {
+        let prefix = providerPrefix(provider.name) + "/"
+        guard model.lowercased().hasPrefix(prefix) else { return model }
+        return String(model.dropFirst(prefix.count))
     }
 
     private func requestHeaders(for endpoint: ResolvedEndpoint) async throws -> [String: String] {
@@ -354,6 +384,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
             headers["chatgpt-account-id"] = tokens.accountId
             headers["OpenAI-Beta"] = "responses=experimental"
             headers["originator"] = "codex_cli_rs"
+            headers["User-Agent"] = OpenAICodexOAuthService.codexUserAgent()
             headers["Accept"] = "text/event-stream"
             headers["Content-Type"] = "application/json"
             return headers
@@ -361,6 +392,36 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         var headers = await provider.resolvedHeadersOffMainActor()
         if headers["Content-Type"] == nil { headers["Content-Type"] = "application/json" }
         return headers
+    }
+
+    private func codexResponsesLiteSessionId(for sourceKey: String?) -> String {
+        let key = sourceKey.flatMap { $0.isEmpty ? nil : $0 } ?? "request-\(UUID().uuidString)"
+        if let existing = codexResponsesLiteSessionIds[key] { return existing }
+        if codexResponsesLiteSessionIds.count >= 1_024,
+            let oldest = codexResponsesLiteSessionOrder.first
+        {
+            codexResponsesLiteSessionIds.removeValue(forKey: oldest)
+            codexResponsesLiteSessionOrder.removeFirst()
+        }
+        let generated = Self.makeUUIDv7()
+        codexResponsesLiteSessionIds[key] = generated
+        codexResponsesLiteSessionOrder.append(key)
+        return generated
+    }
+
+    static func makeUUIDv7(now: Date = Date(), randomUUID: UUID = UUID()) -> String {
+        var bytes = withUnsafeBytes(of: randomUUID.uuid) { Array($0) }
+        let milliseconds = UInt64(max(0, now.timeIntervalSince1970 * 1_000))
+        bytes[0] = UInt8((milliseconds >> 40) & 0xff)
+        bytes[1] = UInt8((milliseconds >> 32) & 0xff)
+        bytes[2] = UInt8((milliseconds >> 24) & 0xff)
+        bytes[3] = UInt8((milliseconds >> 16) & 0xff)
+        bytes[4] = UInt8((milliseconds >> 8) & 0xff)
+        bytes[5] = UInt8(milliseconds & 0xff)
+        bytes[6] = (bytes[6] & 0x0f) | 0x70
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        let hex = bytes.map { String(format: "%02x", $0) }
+        return "\(hex[0...3].joined())-\(hex[4...5].joined())-\(hex[6...7].joined())-\(hex[8...9].joined())-\(hex[10...15].joined())"
     }
 
     func streamChat(request: ChatCompletionRequest) async throws -> AsyncThrowingStream<String, Error> {
@@ -376,6 +437,11 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                     "No endpoint for model \"\(resolvedModel)\". Add a provider (and key, if it needs one) in Settings → Providers, or set the DEEPSEEK_API_KEY env var."
             )
         }
+        let usesResponsesLite = endpoint.isCodex
+            && OpenAICodexOAuthService.usesResponsesLite(modelId: endpoint.modelId)
+        let responsesLiteSessionId = usesResponsesLite
+            ? codexResponsesLiteSessionId(for: request.session_id)
+            : nil
 
         NSLog("[CloudChatEngine] Starting streamChat — model=\(resolvedModel), via=\(endpoint.providerLabel), messages=\(request.messages.count), tools=\(request.tools?.count ?? 0)")
 
@@ -401,7 +467,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                         round += 1
 
                         var body: [String: Any] = [
-                            "model": resolvedModel,
+                            "model": endpoint.modelId,
                             "messages": wireMessages,
                             "stream": true,
                         ]
@@ -417,7 +483,10 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                             {
                                 body["reasoning_effort"] = effort.lowercased()
                             }
-                            body = try IntelCodexResponsesAdapter.makeRequest(chatCompletions: body)
+                            body = try IntelCodexResponsesAdapter.makeRequest(
+                                chatCompletions: body,
+                                responsesLiteSessionId: responsesLiteSessionId
+                            )
                             var input = body["input"] as? [[String: Any]] ?? []
                             input.append(contentsOf: codexReplayItems)
                             body["input"] = input
@@ -431,6 +500,12 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
                         var urlRequest = URLRequest(url: URL(string: endpoint.url)!)
                         urlRequest.httpMethod = "POST"
                         for (k, v) in try await self.requestHeaders(for: endpoint) { urlRequest.setValue(v, forHTTPHeaderField: k) }
+                        if let responsesLiteSessionId {
+                            urlRequest.setValue(responsesLiteSessionId, forHTTPHeaderField: "session-id")
+                            urlRequest.setValue(responsesLiteSessionId, forHTTPHeaderField: "x-session-affinity")
+                            urlRequest.setValue(OpenAICodexOAuthService.codexClientVersion, forHTTPHeaderField: "version")
+                            urlRequest.setValue("true", forHTTPHeaderField: "x-openai-internal-codex-responses-lite")
+                        }
                         urlRequest.timeoutInterval = 300
                         // CANONICAL (sorted-key) serialization — bare JSONSerialization emits
         // keys in hash order, which differs across app launches (and can differ
@@ -783,7 +858,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol {
         urlRequest.timeoutInterval = 300
 
         var body: [String: Any] = [
-            "model": resolvedModel,
+            "model": endpoint.modelId,
             "messages": request.messages.map { msg -> [String: Any] in
                 var m: [String: Any] = ["role": msg.role]
                 if let content = msg.content { m["content"] = content }
